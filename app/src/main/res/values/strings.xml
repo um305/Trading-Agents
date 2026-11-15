@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">TradingAgents</string>
+    <string name="tagline">Multi-Agent Financial Intelligence</string>
+    <string name="fundamental_analyst">Fundamental Analyst</string>
+    <string name="technical_analyst">Technical Analyst</string>
+    <string name="sentiment_analyst">Sentiment &amp; News Analyst</string>
+    <string name="risk_manager">Risk Manager</string>
+    <string name="chief_trader">Chief Strategist</string>
+</resources>

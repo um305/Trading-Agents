@@ -1,0 +1,6 @@
+{
+  "name": "TradingAgents",
+  "description": "Multi-agent financial trading framework with real-time crypto spot & perpetual futures scanning, multi-API data analysis, and multi-model AI load balancing",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
