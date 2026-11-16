@@ -1,11 +1,14 @@
 // NOTE: To switch the bottom navigation bar to text-only mode, set the icon slot in NavigationBarItem / NavigationRailItem to null (or omit the icon parameter).
 package com.example
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.mutableStateOf
+import com.example.data.notification.PriceAlertNotificationManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -85,6 +88,8 @@ import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 
 class MainActivity : ComponentActivity() {
+    private val pendingNotificationIntent = mutableStateOf<Pair<String, String?>?>(null)
+
     @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -92,6 +97,7 @@ class MainActivity : ComponentActivity() {
             statusBarStyle = androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = androidx.activity.SystemBarStyle.dark(android.graphics.Color.parseColor("#111622"))
         )
+        handleNotificationIntent(intent)
         setContent {
             val windowSizeClass = calculateWindowSizeClass(this)
             CompositionLocalProvider(
@@ -100,19 +106,49 @@ class MainActivity : ComponentActivity() {
                 LocalWindowHeightSizeClass provides windowSizeClass.heightSizeClass
             ) {
                 MyApplicationTheme {
-                    TradingAgentsApp()
+                    TradingAgentsApp(
+                        pendingNotificationTarget = pendingNotificationIntent.value,
+                        onNotificationTargetConsumed = { pendingNotificationIntent.value = null }
+                    )
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleNotificationIntent(intent)
+    }
+
+    private fun handleNotificationIntent(intent: Intent?) {
+        val sym = intent?.getStringExtra(PriceAlertNotificationManager.EXTRA_SYMBOL)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() } ?: return
+        val horizon = intent.getStringExtra(PriceAlertNotificationManager.EXTRA_HORIZON)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+        pendingNotificationIntent.value = sym to horizon
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TradingAgentsApp(viewModel: MainViewModel = viewModel()) {
+fun TradingAgentsApp(
+    viewModel: MainViewModel = viewModel(),
+    pendingNotificationTarget: Pair<String, String?>? = null,
+    onNotificationTargetConsumed: () -> Unit = {}
+) {
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val isExpanded = AdaptiveLayoutUtils.isExpanded
+
+    LaunchedEffect(pendingNotificationTarget) {
+        pendingNotificationTarget?.let { (sym, horizon) ->
+            viewModel.openFromNotification(sym, horizon)
+            onNotificationTargetConsumed()
+        }
+    }
 
     LaunchedEffect(uiState.feedbackMessage) {
         uiState.feedbackMessage?.let { msg ->

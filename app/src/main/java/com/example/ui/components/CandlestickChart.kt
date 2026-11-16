@@ -55,17 +55,23 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.domain.master.HorizonPlan
+import com.example.domain.master.MasterVerdict
+import com.example.domain.master.TradingHorizon
 import com.example.domain.model.CandlePoint
 import com.example.domain.model.PositionSide
+import com.example.domain.model.SignalVerdictState
 import com.example.domain.model.TradePlanLifecycleStatus
 import com.example.domain.model.TradeSetupPlan
 import com.example.domain.util.PriceFormatter
+import com.example.ui.theme.AgentPurple
 import com.example.ui.theme.BearishRed
 import com.example.ui.theme.BullishGreen
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkBorder
 import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.DarkSurfaceElevated
+import com.example.ui.theme.RiskAmber
 import com.example.ui.theme.TechCyan
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
@@ -81,6 +87,8 @@ fun CandlestickChart(
     showSma: Boolean = true,
     tradeSetupPlan: TradeSetupPlan? = null,
     currentPrice: Double = 0.0,
+    masterVerdict: MasterVerdict? = null,
+    selectedHorizon: TradingHorizon = TradingHorizon.INTRADAY,
     onRecalculateSetup: () -> Unit = {}
 ) {
     if (candles.isEmpty()) {
@@ -93,18 +101,25 @@ fun CandlestickChart(
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
     var showSmaState by remember { mutableStateOf(showSma) }
 
-    // Multi-target calculations from TradeSetupPlan
-    val isLong = tradeSetupPlan?.side != PositionSide.SHORT
-    val riskSpan = if (tradeSetupPlan != null) kotlin.math.abs(tradeSetupPlan.recommendedEntry - tradeSetupPlan.stopLoss) else 10.0
-    val rawTp1 = tradeSetupPlan?.takeProfit1?.takeIf { it > 0 } ?: tradeSetupPlan?.let {
-        if (isLong) it.recommendedEntry + riskSpan * 2.0 else it.recommendedEntry - riskSpan * 2.0
+    val activeHorizonPlan: HorizonPlan? = remember(masterVerdict, selectedHorizon) {
+        masterVerdict?.horizonPlans?.get(selectedHorizon)
     }
-    val rawTp2 = tradeSetupPlan?.takeProfit2?.takeIf { it > 0 } ?: tradeSetupPlan?.let {
-        if (isLong) it.recommendedEntry + riskSpan * 3.5 else it.recommendedEntry - riskSpan * 3.5
-    }
-    val rawTp3 = tradeSetupPlan?.takeProfit3?.takeIf { it > 0 } ?: tradeSetupPlan?.let {
-        if (isLong) it.recommendedEntry + riskSpan * 5.2 else it.recommendedEntry - riskSpan * 5.2
-    }
+
+    // Multi-target calculations from HorizonPlan (preferred) or TradeSetupPlan
+    val effectiveSide = activeHorizonPlan?.side ?: tradeSetupPlan?.side ?: PositionSide.LONG
+    val isLong = effectiveSide != PositionSide.SHORT
+    val entryBase = activeHorizonPlan?.limitPrice?.takeIf { it > 0.0 } ?: tradeSetupPlan?.recommendedEntry ?: 0.0
+    val stopBase = activeHorizonPlan?.stopLoss?.takeIf { it > 0.0 } ?: tradeSetupPlan?.stopLoss ?: 0.0
+    val riskSpan = if (entryBase > 0.0 && stopBase > 0.0) kotlin.math.abs(entryBase - stopBase) else 10.0
+    val rawTp1 = activeHorizonPlan?.tp1?.takeIf { it > 0.0 }
+        ?: tradeSetupPlan?.takeProfit1?.takeIf { it > 0 }
+        ?: if (entryBase > 0.0) (if (isLong) entryBase + riskSpan * 2.0 else entryBase - riskSpan * 2.0) else null
+    val rawTp2 = activeHorizonPlan?.tp2?.takeIf { it > 0.0 }
+        ?: tradeSetupPlan?.takeProfit2?.takeIf { it > 0 }
+        ?: if (entryBase > 0.0) (if (isLong) entryBase + riskSpan * 3.5 else entryBase - riskSpan * 3.5) else null
+    val rawTp3 = activeHorizonPlan?.tp3?.takeIf { it > 0.0 }
+        ?: tradeSetupPlan?.takeProfit3?.takeIf { it > 0 }
+        ?: if (entryBase > 0.0) (if (isLong) entryBase + riskSpan * 5.2 else entryBase - riskSpan * 5.2) else null
 
     val (effectiveTp1, effectiveTp2, effectiveTp3) = if (isLong) {
         val list = listOfNotNull(rawTp1, rawTp2, rawTp3).sorted()
@@ -117,6 +132,12 @@ fun CandlestickChart(
     // Interactive chart overlay controls
     var showTargetsOverlay by remember { mutableStateOf(true) }
     var focusCandlesMode by remember { mutableStateOf(false) }
+    var showZonesOverlay by remember { mutableStateOf(true) }
+    var showLiquidityOverlay by remember { mutableStateOf(true) }
+    var showVwapOverlay by remember { mutableStateOf(false) }
+    var showEmaOverlay by remember { mutableStateOf(true) }
+    var showVolProfileOverlay by remember { mutableStateOf(false) }
+    var showAllHorizonsOverlay by remember { mutableStateOf(false) }
 
     // Adjustable Chart Zoom & Pan states (Keyed to symbol and timeframe so live ticks don't jump/reset)
     val totalCandles = candles.size
@@ -149,13 +170,13 @@ fun CandlestickChart(
     val lastCandleClose = visibleCandles.lastOrNull()?.close ?: candleMax
     val chartAtr = com.example.domain.analytics.QuantitativeEngine.calculateATR(visibleCandles, 14).takeIf { it > 0 } ?: (candleSpan / visibleCandles.size.coerceAtLeast(1))
 
-    val slVal = tradeSetupPlan?.stopLoss?.takeIf { it > 0 }
-    val tp1Val = effectiveTp1?.takeIf { it > 0 }
-    val tp2Val = effectiveTp2?.takeIf { it > 0 }
-    val tp3Val = effectiveTp3?.takeIf { it > 0 }
-    val entryVal = tradeSetupPlan?.recommendedEntry?.takeIf { it > 0 }
-    val zStart = tradeSetupPlan?.entryZoneStart?.takeIf { it > 0 }
-    val zEnd = tradeSetupPlan?.entryZoneEnd?.takeIf { it > 0 }
+    val slVal = stopBase.takeIf { it > 0.0 }
+    val tp1Val = effectiveTp1?.takeIf { it > 0.0 }
+    val tp2Val = effectiveTp2?.takeIf { it > 0.0 }
+    val tp3Val = effectiveTp3?.takeIf { it > 0.0 }
+    val entryVal = entryBase.takeIf { it > 0.0 }
+    val zStart = activeHorizonPlan?.entryZoneMin?.takeIf { it > 0.0 } ?: tradeSetupPlan?.entryZoneStart?.takeIf { it > 0.0 }
+    val zEnd = activeHorizonPlan?.entryZoneMax?.takeIf { it > 0.0 } ?: tradeSetupPlan?.entryZoneEnd?.takeIf { it > 0.0 }
 
     // Dynamic Range calculation:
     // Guarantees candles, entry corridor, SL, and TP targets are reliably framed
@@ -400,6 +421,44 @@ fun CandlestickChart(
                 }
             }
 
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // Secondary Indicator & Overlay Toggles Row (Zones, Liquidity, VWAP, EMA20/50, VolProfile, All Horizons)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val toggleItems = listOf(
+                    Triple("Zones", showZonesOverlay) { showZonesOverlay = !showZonesOverlay },
+                    Triple("Liquidity", showLiquidityOverlay) { showLiquidityOverlay = !showLiquidityOverlay },
+                    Triple("VWAP", showVwapOverlay) { showVwapOverlay = !showVwapOverlay },
+                    Triple("EMA20/50", showEmaOverlay) { showEmaOverlay = !showEmaOverlay },
+                    Triple("VolProfile", showVolProfileOverlay) { showVolProfileOverlay = !showVolProfileOverlay },
+                    Triple("All horizons", showAllHorizonsOverlay) { showAllHorizonsOverlay = !showAllHorizonsOverlay }
+                )
+                toggleItems.forEach { (label, active, onToggle) ->
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(if (active) TechCyan.copy(alpha = 0.16f) else DarkSurfaceElevated)
+                            .border(1.dp, if (active) TechCyan.copy(alpha = 0.55f) else DarkBorder, RoundedCornerShape(6.dp))
+                            .clickable { onToggle() }
+                            .padding(horizontal = 7.dp, vertical = 3.dp)
+                            .testTag("chart_toggle_${label.lowercase(Locale.US).replace(" ", "_").replace("/", "_")}")
+                    ) {
+                        Text(
+                            text = label,
+                            color = if (active) TechCyan else TextMuted,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
             Spacer(modifier = Modifier.height(3.dp))
 
             // Open, High, Low metrics row with net change (Horizontal scrollable to never wrap or truncate)
@@ -410,9 +469,19 @@ fun CandlestickChart(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                if (activeHorizonPlan != null) {
+                    Text(
+                        text = "${selectedHorizon.label} (${activeHorizonPlan.setupTf.label})",
+                        color = TechCyan,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        maxLines = 1
+                    )
+                }
                 Text("O: ${PriceFormatter.formatCurrency(activeCandle.open)}", color = TextSecondary, fontSize = 9.sp, maxLines = 1)
                 Text("H: ${PriceFormatter.formatCurrency(activeCandle.high)}", color = BullishGreen, fontSize = 9.sp, maxLines = 1)
                 Text("L: ${PriceFormatter.formatCurrency(activeCandle.low)}", color = BearishRed, fontSize = 9.sp, maxLines = 1)
+                Text("Vol: ${String.format(Locale.US, "%.0f", activeCandle.volume)}", color = TextMuted, fontSize = 9.sp, maxLines = 1)
                 val cDiff = activeCandle.close - activeCandle.open
                 val cPct = if (activeCandle.open > 0) (cDiff / activeCandle.open) * 100 else 0.0
                 val cColor = if (cDiff >= 0) BullishGreen else BearishRed
@@ -770,8 +839,10 @@ fun CandlestickChart(
             val canvasHeight = size.height
             val chartHeight = canvasHeight * 0.80f
             val volumeHeight = canvasHeight * 0.20f
-            val rightBadgeMargin = with(density) { 78.dp.toPx() }
-            val plotWidth = (canvasWidth - rightBadgeMargin).coerceAtLeast(100f)
+            val rightBadgeMargin = with(density) { 82.dp.toPx() }
+            val hasCone = activeHorizonPlan?.replayFanBands?.isNotEmpty() == true
+            val coneMargin = if (hasCone) with(density) { 46.dp.toPx() } else 0f
+            val plotWidth = (canvasWidth - rightBadgeMargin - coneMargin).coerceAtLeast(100f)
             val candleCount = visibleCandles.size
             val candleWidth = plotWidth / candleCount
 
@@ -779,103 +850,182 @@ fun CandlestickChart(
                 return (chartHeight - ((price - minPrice) / priceRange * chartHeight).toFloat()).coerceIn(0f, chartHeight)
             }
 
-            // OVERLAY: Optimal Entry Zone Band (clean transparent accumulation corridor that never obscures candles)
-            if (tradeSetupPlan != null && showTargetsOverlay && tradeSetupPlan.isAvailable && tradeSetupPlan.recommendedEntry > 0.0 && tradeSetupPlan.stopLoss > 0.0 && tradeSetupPlan.verdictState != com.example.domain.model.SignalVerdictState.NO_TRADE) {
-                val zoneTopPrice = maxOf(tradeSetupPlan.entryZoneStart, tradeSetupPlan.entryZoneEnd)
-                val zoneBottomPrice = minOf(tradeSetupPlan.entryZoneStart, tradeSetupPlan.entryZoneEnd)
+            // OVERLAY: Volume Profile horizontal histogram (16 buckets across visible range)
+            if (showVolProfileOverlay && visibleCandles.isNotEmpty() && priceRange > 0.0) {
+                val buckets = 16
+                val volProfile = DoubleArray(buckets)
+                visibleCandles.forEach { c ->
+                    val b = (((c.close - minPrice) / priceRange) * (buckets - 1)).toInt().coerceIn(0, buckets - 1)
+                    volProfile[b] += c.volume
+                }
+                val maxBucketVol = volProfile.maxOrNull()?.coerceAtLeast(1.0) ?: 1.0
+                val bucketH = chartHeight / buckets
+                val maxHistW = plotWidth * 0.20f
+                for (b in 0 until buckets) {
+                    val w = ((volProfile[b] / maxBucketVol) * maxHistW).toFloat()
+                    val yTop = chartHeight - ((b + 1) * bucketH)
+                    drawRect(
+                        color = TechCyan.copy(alpha = 0.12f),
+                        topLeft = Offset(0f, yTop),
+                        size = Size(w, maxOf(bucketH - 1f, 1f))
+                    )
+                }
+            }
+
+            // OVERLAY: Optimal Entry Zone Band + Invalidation shading
+            if (showZonesOverlay && showTargetsOverlay && entryVal != null && slVal != null &&
+                (activeHorizonPlan?.state ?: tradeSetupPlan?.verdictState) != SignalVerdictState.NO_TRADE
+            ) {
+                val zoneTopPrice = maxOf(zStart ?: entryVal, zEnd ?: entryVal)
+                val zoneBottomPrice = minOf(zStart ?: entryVal, zEnd ?: entryVal)
                 val zoneTopY = priceToY(zoneTopPrice)
                 val zoneBottomY = priceToY(zoneBottomPrice)
                 val zoneHeight = maxOf(zoneBottomY - zoneTopY, 4f)
                 val zoneColor = if (isLong) BullishGreen else BearishRed
 
-                // Clearly visible shaded Entry Zone corridor so the range is prominent
                 drawRect(
                     color = zoneColor.copy(alpha = 0.16f),
                     topLeft = Offset(0f, zoneTopY),
                     size = Size(plotWidth, zoneHeight)
                 )
-                // Zone Boundary dashed lines
                 drawLine(
                     color = zoneColor.copy(alpha = 0.70f),
                     start = Offset(0f, zoneTopY),
-                    end = Offset(canvasWidth, zoneTopY),
+                    end = Offset(plotWidth + coneMargin, zoneTopY),
                     strokeWidth = 1.5f,
                     pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f)
                 )
                 drawLine(
                     color = zoneColor.copy(alpha = 0.70f),
                     start = Offset(0f, zoneBottomY),
-                    end = Offset(canvasWidth, zoneBottomY),
+                    end = Offset(plotWidth + coneMargin, zoneBottomY),
                     strokeWidth = 1.5f,
                     pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f)
                 )
 
-                // OVERLAY: TP1 dashed line (drawn only if within view)
+                // Invalidation shading from zone far edge to SL
+                if (slVal in minPrice..maxPrice) {
+                    val slY = priceToY(slVal)
+                    val invStartY = if (isLong) zoneBottomY else slY
+                    val invEndY = if (isLong) slY else zoneTopY
+                    if (invEndY > invStartY) {
+                        drawRect(
+                            color = BearishRed.copy(alpha = 0.09f),
+                            topLeft = Offset(0f, invStartY),
+                            size = Size(plotWidth, invEndY - invStartY)
+                        )
+                    }
+                    drawLine(
+                        color = BearishRed.copy(alpha = 0.85f),
+                        start = Offset(0f, slY),
+                        end = Offset(canvasWidth - rightBadgeMargin, slY),
+                        strokeWidth = 1.4f,
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
+                    )
+                }
+
                 if (effectiveTp1 != null && effectiveTp1 > 0 && effectiveTp1 in minPrice..maxPrice) {
                     val tp1Y = priceToY(effectiveTp1)
                     drawLine(
                         color = BullishGreen.copy(alpha = 0.85f),
                         start = Offset(0f, tp1Y),
-                        end = Offset(canvasWidth, tp1Y),
+                        end = Offset(canvasWidth - rightBadgeMargin, tp1Y),
                         strokeWidth = 1.3f,
                         pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
                     )
                 }
 
-                // OVERLAY: TP2 dashed line (drawn only if within view)
                 if (effectiveTp2 != null && effectiveTp2 > 0 && effectiveTp2 in minPrice..maxPrice) {
                     val tp2Y = priceToY(effectiveTp2)
                     drawLine(
                         color = BullishGreen.copy(alpha = 0.70f),
                         start = Offset(0f, tp2Y),
-                        end = Offset(canvasWidth, tp2Y),
+                        end = Offset(canvasWidth - rightBadgeMargin, tp2Y),
                         strokeWidth = 1.2f,
                         pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f)
                     )
                 }
 
-                // OVERLAY: TP3 dashed line (drawn only if within view)
                 if (effectiveTp3 != null && effectiveTp3 > 0 && effectiveTp3 in minPrice..maxPrice) {
                     val tp3Y = priceToY(effectiveTp3)
                     drawLine(
                         color = TechCyan.copy(alpha = 0.70f),
                         start = Offset(0f, tp3Y),
-                        end = Offset(canvasWidth, tp3Y),
+                        end = Offset(canvasWidth - rightBadgeMargin, tp3Y),
                         strokeWidth = 1.2f,
                         pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 6f), 0f)
                     )
                 }
 
-                // OVERLAY: Stop Loss (SL) dashed line (drawn only if within view)
-                if (tradeSetupPlan.stopLoss > 0 && tradeSetupPlan.stopLoss in minPrice..maxPrice) {
-                    val slY = priceToY(tradeSetupPlan.stopLoss)
-                    drawLine(
-                        color = BearishRed.copy(alpha = 0.80f),
-                        start = Offset(0f, slY),
-                        end = Offset(canvasWidth, slY),
-                        strokeWidth = 1.3f,
-                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
-                    )
-                }
-
-                // OVERLAY: Planned Limit Entry Line (delicate 1.4f dashed line that never covers or obscures candles)
-                if (tradeSetupPlan.recommendedEntry in minPrice..maxPrice) {
-                    val entryY = priceToY(tradeSetupPlan.recommendedEntry)
+                if (entryVal in minPrice..maxPrice) {
+                    val entryY = priceToY(entryVal)
                     drawLine(
                         color = TechCyan.copy(alpha = 0.85f),
                         start = Offset(0f, entryY),
-                        end = Offset(canvasWidth, entryY),
+                        end = Offset(canvasWidth - rightBadgeMargin, entryY),
                         strokeWidth = 1.4f,
                         pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 6f), 0f)
                     )
                 }
             }
 
+            // OVERLAY: Liquidity BSL (> price) & SSL (< price) lines
+            val refLive = if (currentPrice > 0.0) currentPrice else lastCandleClose
+            val bslPrice = activeHorizonPlan?.bslLevel?.takeIf { it > refLive && it in minPrice..maxPrice }
+            val sslPrice = activeHorizonPlan?.sslLevel?.takeIf { it < refLive && it in minPrice..maxPrice }
+            if (showLiquidityOverlay) {
+                bslPrice?.let { bsl ->
+                    val y = priceToY(bsl)
+                    drawLine(
+                        color = RiskAmber.copy(alpha = 0.65f),
+                        start = Offset(0f, y),
+                        end = Offset(plotWidth, y),
+                        strokeWidth = 1f,
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(3f, 5f), 0f)
+                    )
+                }
+                sslPrice?.let { ssl ->
+                    val y = priceToY(ssl)
+                    drawLine(
+                        color = AgentPurple.copy(alpha = 0.65f),
+                        start = Offset(0f, y),
+                        end = Offset(plotWidth, y),
+                        strokeWidth = 1f,
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(3f, 5f), 0f)
+                    )
+                }
+            }
 
+            // OVERLAY: All horizons faint levels
+            if (showAllHorizonsOverlay && masterVerdict != null) {
+                masterVerdict.horizonPlans.forEach { (h, hp) ->
+                    if (h != selectedHorizon && h != TradingHorizon.OUTLOOK) {
+                        hp.limitPrice?.takeIf { it > 0.0 && it in minPrice..maxPrice }?.let { lim ->
+                            val y = priceToY(lim)
+                            drawLine(
+                                color = TechCyan.copy(alpha = 0.25f),
+                                start = Offset(0f, y),
+                                end = Offset(plotWidth, y),
+                                strokeWidth = 0.9f,
+                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(2f, 6f), 0f)
+                            )
+                        }
+                    }
+                }
+            }
 
-            // Draw visible historical candles and volume bars
+            // Draw visible historical candles and volume bars + EMA20/EMA50 + Anchored VWAP
             val smaPoints = mutableListOf<Offset>()
+            val ema20Points = mutableListOf<Offset>()
+            val ema50Points = mutableListOf<Offset>()
+            val vwapPoints = mutableListOf<Offset>()
             val smaWindow = 14
+            var ema20Val = visibleCandles.first().close
+            var ema50Val = visibleCandles.first().close
+            var cumPv = 0.0
+            var cumVol = 0.0
+            val k20 = 2.0 / 21.0
+            val k50 = 2.0 / 51.0
 
             visibleCandles.forEachIndexed { index, candle ->
                 val xCenter = (index * candleWidth) + (candleWidth / 2f)
@@ -888,7 +1038,6 @@ fun CandlestickChart(
                 val isBullish = candle.close >= candle.open
                 val candleColor = if (isBullish) BullishGreen else BearishRed
 
-                // Wick line
                 drawLine(
                     color = candleColor,
                     start = Offset(xCenter, highY),
@@ -896,7 +1045,6 @@ fun CandlestickChart(
                     strokeWidth = 2f
                 )
 
-                // Candle body
                 val bodyTop = minOf(openY, closeY)
                 val bodyBottom = maxOf(openY, closeY)
                 val bodyHeight = maxOf(bodyBottom - bodyTop, 2f)
@@ -908,7 +1056,6 @@ fun CandlestickChart(
                     size = Size(bodyWidth, bodyHeight)
                 )
 
-                // Volume bar at bottom
                 val volRatio = (candle.volume / maxVolume).toFloat().coerceIn(0f, 1f)
                 val volBarHeight = volumeHeight * volRatio
                 val volTop = canvasHeight - volBarHeight
@@ -918,26 +1065,120 @@ fun CandlestickChart(
                     size = Size(bodyWidth, volBarHeight)
                 )
 
-                // Calculate SMA points
                 if (showSmaState && index >= smaWindow - 1) {
                     val subset = visibleCandles.subList(index - smaWindow + 1, index + 1)
                     val avgClose = subset.map { it.close }.average()
-                    val smaY = priceToY(avgClose)
-                    smaPoints.add(Offset(xCenter, smaY))
+                    smaPoints.add(Offset(xCenter, priceToY(avgClose)))
+                }
+
+                if (index == 0) {
+                    ema20Val = candle.close
+                    ema50Val = candle.close
+                } else {
+                    ema20Val = candle.close * k20 + ema20Val * (1.0 - k20)
+                    ema50Val = candle.close * k50 + ema50Val * (1.0 - k50)
+                }
+                if (showEmaOverlay) {
+                    ema20Points.add(Offset(xCenter, priceToY(ema20Val)))
+                    ema50Points.add(Offset(xCenter, priceToY(ema50Val)))
+                }
+                if (showVwapOverlay) {
+                    val tp = (candle.high + candle.low + candle.close) / 3.0
+                    val v = candle.volume.coerceAtLeast(1.0)
+                    cumPv += tp * v
+                    cumVol += v
+                    vwapPoints.add(Offset(xCenter, priceToY(cumPv / cumVol)))
                 }
             }
 
-            // Draw SMA 14 overlay line
             if (showSmaState && smaPoints.size > 1) {
-                val path = Path()
-                path.moveTo(smaPoints.first().x, smaPoints.first().y)
-                for (i in 1 until smaPoints.size) {
-                    path.lineTo(smaPoints[i].x, smaPoints[i].y)
+                val path = Path().apply {
+                    moveTo(smaPoints.first().x, smaPoints.first().y)
+                    for (i in 1 until smaPoints.size) lineTo(smaPoints[i].x, smaPoints[i].y)
                 }
+                drawPath(path = path, color = TechCyan.copy(alpha = 0.7f), style = Stroke(width = 2.0f))
+            }
+
+            if (showEmaOverlay && ema20Points.size > 1) {
+                val p20 = Path().apply {
+                    moveTo(ema20Points.first().x, ema20Points.first().y)
+                    for (i in 1 until ema20Points.size) lineTo(ema20Points[i].x, ema20Points[i].y)
+                }
+                drawPath(path = p20, color = RiskAmber.copy(alpha = 0.78f), style = Stroke(width = 1.6f))
+            }
+            if (showEmaOverlay && ema50Points.size > 1) {
+                val p50 = Path().apply {
+                    moveTo(ema50Points.first().x, ema50Points.first().y)
+                    for (i in 1 until ema50Points.size) lineTo(ema50Points[i].x, ema50Points[i].y)
+                }
+                drawPath(path = p50, color = AgentPurple.copy(alpha = 0.78f), style = Stroke(width = 1.6f))
+            }
+            if (showVwapOverlay && vwapPoints.size > 1) {
+                val pv = Path().apply {
+                    moveTo(vwapPoints.first().x, vwapPoints.first().y)
+                    for (i in 1 until vwapPoints.size) lineTo(vwapPoints[i].x, vwapPoints[i].y)
+                }
+                drawPath(path = pv, color = Color.White.copy(alpha = 0.8f), style = Stroke(width = 1.8f))
+            }
+
+            // "now" vertical divider at last candle + Replay Forecast Cone (p5..p95)
+            val nowX = plotWidth
+            drawLine(
+                color = Color.White.copy(alpha = 0.30f),
+                start = Offset(nowX, 0f),
+                end = Offset(nowX, chartHeight),
+                strokeWidth = 1f,
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(3f, 4f), 0f)
+            )
+            if (hasCone && coneMargin > 8f) {
+                val bands = activeHorizonPlan!!.replayFanBands
+                val p95Path = Path()
+                val p50Path = Path()
+                val p5Path = Path()
+                val fillPath = Path()
+                val anchorPrice = entryVal ?: refLive
+                val anchorY = priceToY(anchorPrice)
+                p95Path.moveTo(nowX, anchorY)
+                p50Path.moveTo(nowX, anchorY)
+                p5Path.moveTo(nowX, anchorY)
+                fillPath.moveTo(nowX, anchorY)
+                bands.forEachIndexed { i, pt ->
+                    val frac = (i + 1).toFloat() / bands.size.toFloat()
+                    val x = nowX + frac * coneMargin
+                    p95Path.lineTo(x, priceToY(pt.p95))
+                    p50Path.lineTo(x, priceToY(pt.p50))
+                    p5Path.lineTo(x, priceToY(pt.p5))
+                    fillPath.lineTo(x, priceToY(pt.p95))
+                }
+                for (i in bands.indices.reversed()) {
+                    val frac = (i + 1).toFloat() / bands.size.toFloat()
+                    val x = nowX + frac * coneMargin
+                    fillPath.lineTo(x, priceToY(bands[i].p5))
+                }
+                fillPath.close()
+                drawPath(path = fillPath, color = TechCyan.copy(alpha = 0.12f))
                 drawPath(
-                    path = path,
-                    color = TechCyan.copy(alpha = 0.7f),
-                    style = Stroke(width = 2.2f)
+                    path = p95Path,
+                    color = TechCyan.copy(alpha = 0.65f),
+                    style = Stroke(width = 1.2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 4f), 0f))
+                )
+                drawPath(
+                    path = p5Path,
+                    color = BearishRed.copy(alpha = 0.60f),
+                    style = Stroke(width = 1.2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 4f), 0f))
+                )
+                drawPath(path = p50Path, color = BullishGreen.copy(alpha = 0.75f), style = Stroke(width = 1.4f))
+
+                val notePaint = Paint().apply {
+                    isAntiAlias = true
+                    color = android.graphics.Color.LTGRAY
+                    textSize = with(density) { 7.5.sp.toPx() }
+                }
+                drawContext.canvas.nativeCanvas.drawText(
+                    "replay range, not a prediction",
+                    (nowX - with(density) { 105.dp.toPx() }).coerceAtLeast(4f),
+                    with(density) { 11.dp.toPx() },
+                    notePaint
                 )
             }
 
@@ -948,14 +1189,14 @@ fun CandlestickChart(
                 drawLine(
                     color = Color.White.copy(alpha = 0.5f),
                     start = Offset(0f, liveY),
-                    end = Offset(canvasWidth, liveY),
+                    end = Offset(canvasWidth - rightBadgeMargin, liveY),
                     strokeWidth = 1f,
                     pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 4f), 0f)
                 )
                 drawCircle(
                     color = TechCyan,
                     radius = 4f,
-                    center = Offset(canvasWidth - 6f, liveY)
+                    center = Offset(plotWidth, liveY)
                 )
             }
 
@@ -1501,31 +1742,13 @@ object ChartBadgeLayoutHelper {
         val inBoundsTopLimit = topMargin
         val inBoundsBottomLimit = (chartHeight - badgeHeight - bottomMargin).coerceAtLeast(inBoundsTopLimit)
 
-        val inBoundsPositions = FloatArray(inBounds.size)
-        for (idx in inBounds.indices) {
-            val idealTop = inBounds[idx].idealY - (badgeHeight / 2f)
-            inBoundsPositions[idx] = idealTop.coerceIn(inBoundsTopLimit, inBoundsBottomLimit)
-        }
-
-        var curTop = inBoundsTopLimit
-        for (idx in inBounds.indices) {
-            inBoundsPositions[idx] = maxOf(inBoundsPositions[idx], curTop)
-            curTop = inBoundsPositions[idx] + step
-        }
-
-        var curBottom = inBoundsBottomLimit
-        for (idx in (inBounds.size - 1) downTo 0) {
-            inBoundsPositions[idx] = minOf(inBoundsPositions[idx], curBottom)
-            curBottom = inBoundsPositions[idx] - step
-        }
-
-        if (inBounds.size > 1 && inBoundsPositions.last() - inBoundsPositions.first() < (inBounds.size - 1) * step) {
-            val available = (inBoundsBottomLimit - inBoundsTopLimit).coerceAtLeast(0f)
-            val uniformStep = (available / (inBounds.size - 1)).coerceAtMost(step)
-            for (idx in inBounds.indices) {
-                inBoundsPositions[idx] = inBoundsTopLimit + (idx * uniformStep)
-            }
-        }
+        val resolvedInBounds = layoutNonOverlappingLabelYs(
+            idealYs = inBounds.map { it.idealY - (badgeHeight / 2f) },
+            minY = inBoundsTopLimit,
+            maxY = inBoundsBottomLimit,
+            minSpacingPx = step
+        )
+        val inBoundsPositions = FloatArray(inBounds.size) { idx -> resolvedInBounds[idx] }
 
         val result = mutableListOf<PositionedBadge>()
 
@@ -1602,6 +1825,57 @@ object ChartBadgeLayoutHelper {
 
         return result
     }
+}
+
+/**
+ * Pure non-overlapping vertical label layout helper (used by chart right-margin badges & unit tests).
+ * Preserves input ordering matching [idealYs] and guarantees at least [minSpacingPx] between adjacent
+ * labels within [minY..maxY] whenever the container spans `(n - 1) * minSpacingPx`.
+ */
+fun layoutNonOverlappingLabelYs(
+    idealYs: List<Float>,
+    minY: Float,
+    maxY: Float,
+    minSpacingPx: Float
+): List<Float> {
+    if (idealYs.isEmpty()) return emptyList()
+    val clampedMax = maxOf(minY, maxY)
+    if (idealYs.size == 1) return listOf(idealYs.first().coerceIn(minY, clampedMax))
+
+    val indexed = idealYs.mapIndexed { idx, y -> idx to y.coerceIn(minY, clampedMax) }
+        .sortedBy { it.second }
+    val pos = FloatArray(indexed.size) { indexed[it].second }
+
+    // Forward push down
+    var cursor = minY
+    for (i in pos.indices) {
+        pos[i] = maxOf(pos[i], cursor)
+        cursor = pos[i] + minSpacingPx
+    }
+
+    // Backward pull up inside bounds
+    cursor = clampedMax
+    for (i in pos.indices.reversed()) {
+        pos[i] = minOf(pos[i], cursor)
+        cursor = pos[i] - minSpacingPx
+    }
+
+    // Re-distribute evenly if constrained range is tighter than total ideal spacing
+    if (pos.last() - pos.first() < (pos.size - 1) * minSpacingPx - 0.5f ||
+        (1 until pos.size).any { pos[it] - pos[it - 1] < minSpacingPx - 0.5f }
+    ) {
+        val avail = (clampedMax - minY).coerceAtLeast(0f)
+        val step = (avail / (pos.size - 1)).coerceAtMost(minSpacingPx)
+        for (i in pos.indices) {
+            pos[i] = minY + i * step
+        }
+    }
+
+    val restored = FloatArray(idealYs.size)
+    indexed.forEachIndexed { sortedIdx, (origIdx, _) ->
+        restored[origIdx] = pos[sortedIdx]
+    }
+    return restored.toList()
 }
 
 fun format2(num: Double): String {

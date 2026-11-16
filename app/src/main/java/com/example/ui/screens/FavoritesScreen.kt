@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
@@ -143,19 +144,46 @@ fun FavoritesScreen(
                 }
             }
 
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(DarkSurfaceElevated)
-                    .border(1.dp, DarkBorder, RoundedCornerShape(8.dp))
-                    .padding(horizontal = 10.dp, vertical = 5.dp)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text(
-                    text = "${favorites.size} Saved",
-                    color = TechCyan,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold
-                )
+                IconButton(
+                    onClick = { viewModel.forceRecomputeWatchlist() },
+                    enabled = !uiState.isRefreshingWatchlist,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .testTag("btn_refresh_watchlist")
+                ) {
+                    if (uiState.isRefreshingWatchlist) {
+                        CircularProgressIndicator(
+                            color = TechCyan,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Refresh Watchlist Verdicts",
+                            tint = TechCyan,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(DarkSurfaceElevated)
+                        .border(1.dp, DarkBorder, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                ) {
+                    Text(
+                        text = "${favorites.size} Saved",
+                        color = TechCyan,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
         }
 
@@ -395,8 +423,11 @@ fun FavoritesScreen(
                 filteredList.forEach { item ->
                     val isCurrent = selectedSymbol == item.symbol
                     val isCrypto = item.assetType == AssetType.CRYPTO.name
+                    val cachedVerdict = uiState.cachedMasterVerdicts
+                        .filter { it.symbol.equals(item.symbol, ignoreCase = true) }
+                        .maxByOrNull { it.computedAt }
 
-                    Box(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(14.dp))
@@ -408,14 +439,15 @@ fun FavoritesScreen(
                             )
                             .clickable { viewModel.selectFavorite(item.symbol) }
                             .padding(14.dp)
-                            .testTag("favorite_item_${item.symbol}")
+                            .testTag("favorite_item_${item.symbol}"),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                                 Box(
                                     modifier = Modifier
                                         .size(34.dp)
@@ -472,7 +504,7 @@ fun FavoritesScreen(
                                         containerColor = if (isCurrent) BullishGreen else DarkSurfaceElevated
                                     ),
                                     shape = RoundedCornerShape(8.dp),
-                                    modifier = Modifier.height(34.dp)
+                                    modifier = Modifier.height(48.dp)
                                 ) {
                                     Text(
                                         text = if (isCurrent) "Viewing" else "See Data",
@@ -482,17 +514,78 @@ fun FavoritesScreen(
                                     )
                                 }
 
-                                Spacer(modifier = Modifier.width(6.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
 
                                 IconButton(
                                     onClick = { viewModel.removeFromFavorites(item.symbol) },
-                                    modifier = Modifier.size(34.dp)
+                                    modifier = Modifier.size(48.dp)
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.Star,
                                         contentDescription = "Remove from Favorites",
                                         tint = RiskAmber,
                                         modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        if (cachedVerdict != null) {
+                            val dotColor = when (cachedVerdict.statusFlag) {
+                                "FRESH" -> BullishGreen
+                                "STALE" -> RiskAmber
+                                else -> BearishRed
+                            }
+                            val ageSec = ((System.currentTimeMillis() - cachedVerdict.computedAt) / 1000L).coerceAtLeast(0L)
+                            val ageStr = when {
+                                ageSec >= 3600L -> "${ageSec / 3600L}h ago"
+                                ageSec >= 60L -> "${ageSec / 60L}m ago"
+                                else -> "${ageSec}s ago"
+                            }
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(DarkBackground)
+                                    .padding(horizontal = 10.dp, vertical = 7.dp)
+                                    .testTag("watchlist_cached_verdict_${item.symbol}"),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(7.dp)
+                                                .clip(CircleShape)
+                                                .background(dotColor)
+                                                .testTag("watchlist_status_dot_${cachedVerdict.statusFlag.lowercase(Locale.US)}")
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = cachedVerdict.headline,
+                                            color = TextPrimary,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1
+                                        )
+                                    }
+                                    Text(
+                                        text = "${cachedVerdict.alignmentPercent}% • ${cachedVerdict.statusFlag} ($ageStr)",
+                                        color = dotColor,
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                                if (cachedVerdict.statusFlag == "FAILED" && !cachedVerdict.errorSummary.isNullOrBlank()) {
+                                    Text(
+                                        text = "Last run issue: ${cachedVerdict.errorSummary}",
+                                        color = BearishRed,
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Medium
                                     )
                                 }
                             }

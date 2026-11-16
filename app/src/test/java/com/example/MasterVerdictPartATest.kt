@@ -83,8 +83,8 @@ class MasterVerdictPartATest {
         val htf1w = buildTrendBars(now, Timeframe.FIVE_DAYS, 80, startPrice = 58_000.0, slopePerBar = 425.0)
         val htf1m = buildTrendBars(now, Timeframe.ONE_MONTH, 48, startPrice = 42_000.0, slopePerBar = 1040.0)
 
-        // 5m trigger candles start at 93,800 and drop sharply to 92,000 (clearly below 5m EMA50, falling EMA12 < EMA26, RSI < 45)
-        val bars5m = buildTrendBars(now, Timeframe.FIVE_MIN, 150, startPrice = 94_200.0, slopePerBar = -15.0)
+        // 5m trigger candles start at 96,000 and drop sharply to ~92,000 (clearly below 5m EMA50, falling EMA12 < EMA26, RSI < 45)
+        val bars5m = buildTrendBars(now, Timeframe.FIVE_MIN, 150, startPrice = 96_000.0, slopePerBar = -42.0)
 
         val verdict = MasterVerdictEngine.evaluate(
             MasterVerdictInput(

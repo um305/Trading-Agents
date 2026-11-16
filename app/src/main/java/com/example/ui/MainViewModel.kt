@@ -4,13 +4,26 @@ import android.app.Application
 import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.background.AnalysisCoordinator
+import com.example.data.background.BackgroundDiagnostics
+import com.example.data.background.BackgroundMonitorMode
+import com.example.data.background.BackgroundPreferences
+import com.example.data.background.BinanceKlineWebSocketClient
+import com.example.data.background.LiveMarketMonitorService
+import com.example.data.background.MarketMonitorWorker
+import com.example.data.background.QuietHoursConfig
+import com.example.data.db.ArmedPlanEntity
 import com.example.data.db.CryptoPair
+import com.example.data.db.MasterVerdictEntity
 import com.example.data.db.SavedResearchReport
 import com.example.data.db.TradingSignal
 import com.example.data.db.WatchlistItem
 import com.example.data.notification.PriceAlertNotificationManager
 import com.example.data.repository.DiagnosticsSnapshot
 import com.example.data.repository.MarketRepository
+import com.example.domain.master.HorizonSettings
+import com.example.domain.master.MasterVerdict
+import com.example.domain.master.TradingHorizon
 import com.example.domain.model.AgentRole
 import com.example.domain.model.AiModelConfig
 import com.example.domain.model.ApiSourceInfo
@@ -184,7 +197,19 @@ data class UiState(
     val acceptHigherRiskThisTrade: Boolean = false,
     val stockFundamentals: StockFundamentalsResult? = null,
     val diagnosticsSnapshot: DiagnosticsSnapshot = DiagnosticsSnapshot(),
-    val futuresPerpAvailableForSymbol: Boolean = true
+    val futuresPerpAvailableForSymbol: Boolean = true,
+    // Master Verdict v1 (Parts A, B, C)
+    val masterVerdict: MasterVerdict? = null,
+    val isLoadingMasterVerdict: Boolean = false,
+    val selectedHorizon: TradingHorizon = TradingHorizon.INTRADAY,
+    val horizonSettings: HorizonSettings = HorizonSettings(),
+    val cachedMasterVerdicts: List<MasterVerdictEntity> = emptyList(),
+    val armedPlans: List<ArmedPlanEntity> = emptyList(),
+    val backgroundMonitorMode: BackgroundMonitorMode = BackgroundMonitorMode.STANDARD,
+    val quietHoursConfig: QuietHoursConfig = QuietHoursConfig(),
+    val allowBgOnBatterySaver: Boolean = false,
+    val backgroundDiagnostics: BackgroundDiagnostics = BackgroundDiagnostics(),
+    val isRefreshingWatchlist: Boolean = false
 ) {
     val connectedCompaniesCount: Int get() = aiCompanies.count { it.isConnected }
     val isEngineOnly: Boolean get() = !aiEnrichmentEnabled || connectedCompaniesCount == 0
@@ -197,9 +222,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = application.getSharedPreferences("trading_agents_prefs", Context.MODE_PRIVATE)
     val notificationManager = PriceAlertNotificationManager(application)
     val alertManager = DayTraderAlertManager(application, notificationManager)
+    private val analysisCoordinator = AnalysisCoordinator(application, repository, notificationManager)
+    private val klineWsClient = BinanceKlineWebSocketClient(repository.getOkHttpClient(), viewModelScope)
     private var liveTickerJob: Job? = null
     private var replayJob: Job? = null
     private var fundamentalsJob: Job? = null
+    private var masterVerdictJob: Job? = null
     private var lastAlertedSymbolStatus: String = ""
     private val _tradePlansCache = mutableMapOf<String, TradeSetupPlan>()
     private fun getPlanCacheKey(symbol: String, marketType: TradingMarketType, timeframe: Timeframe) =
@@ -212,6 +240,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         loadPersistedPreferences()
 
         viewModelScope.launch {
+            repository.syncCalibrationHistoryFromRoom()
             repository.seedDefaultWatchlistIfEmpty()
             repository.seedDefaultAiModelsIfEmpty()
             repository.seedDefaultCompaniesIfEmpty()
@@ -275,6 +304,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
+        viewModelScope.launch {
+            repository.observeCachedMasterVerdicts().collectLatest { verdicts ->
+                _uiState.value = _uiState.value.copy(cachedMasterVerdicts = verdicts)
+            }
+        }
+
+        viewModelScope.launch {
+            repository.observeArmedPlans().collectLatest { armed ->
+                _uiState.value = _uiState.value.copy(armedPlans = armed)
+            }
+        }
+
+        viewModelScope.launch {
+            klineWsClient.closedEvents.collect { evt ->
+                val state = _uiState.value
+                if (evt.symbol.equals(state.selectedSymbol, ignoreCase = true) &&
+                    state.currentQuote?.assetType == AssetType.CRYPTO
+                ) {
+                    repository.cacheRepository.appendClosedWebSocketCandle(
+                        symbol = evt.symbol,
+                        marketType = evt.marketType,
+                        timeframe = evt.timeframe,
+                        candle = evt.candle
+                    )
+                    val q = state.currentQuote ?: return@collect
+                    refreshMasterVerdict(
+                        quote = q,
+                        marketType = evt.marketType,
+                        closedTimeframe = evt.timeframe,
+                        forceRefresh = false
+                    )
+                }
+            }
+        }
+
+        applyBackgroundMonitorSchedule(BackgroundPreferences.getMode(getApplication()))
+
         // Initial load
         executeUnifiedQuery("NVDA")
         scanCrypto(TradingMarketType.FUTURES)
@@ -310,11 +376,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
 
+        val appCtx = getApplication<Application>()
+        val bgMode = BackgroundPreferences.getMode(appCtx)
+        val quietCfg = BackgroundPreferences.getQuietHours(appCtx)
+        val allowBatt = BackgroundPreferences.getAllowOnBatterySaver(appCtx)
+        val hSettings = BackgroundPreferences.getHorizonSettings(appCtx)
+        val bgDiag = BackgroundPreferences.getDiagnostics(appCtx)
+
         _uiState.value = _uiState.value.copy(
             offHoursMode = offHours,
             secUserAgent = secUa,
             stockEntryWindows = parsedWindows,
-            riskSettings = loadedRisk
+            riskSettings = loadedRisk,
+            backgroundMonitorMode = bgMode,
+            quietHoursConfig = quietCfg,
+            allowBgOnBatterySaver = allowBatt,
+            horizonSettings = hSettings,
+            backgroundDiagnostics = bgDiag
         )
     }
 
@@ -1211,7 +1289,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     exchangeQuotes = exchanges,
                     isLoadingQuote = false
                 )
+                if (quote.assetType == AssetType.CRYPTO) {
+                    klineWsClient.subscribe(quote.symbol, routedMarket)
+                } else {
+                    klineWsClient.disconnect()
+                }
                 runDayTraderPipeline(quote, setup, news, synthesis)
+                refreshMasterVerdict(quote = quote, marketType = routedMarket)
 
                 // Async best-timeframe triplet evaluation across 5m / 15m / 1h / 4h / 1D
                 viewModelScope.launch(Dispatchers.Default) {
@@ -1821,7 +1905,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 agentRunningPhase = "",
                 feedbackMessage = "Scan Complete: ${synthesis.verdictState.label} on $clean"
             )
+            if (quote.assetType == AssetType.CRYPTO) {
+                klineWsClient.subscribe(quote.symbol, routedMarket)
+            } else {
+                klineWsClient.disconnect()
+            }
             runDayTraderPipeline(quote, setup, news, synthesis)
+            refreshMasterVerdict(quote = quote, marketType = routedMarket, forceRefresh = true)
 
             // Async best-timeframe triplet evaluation ("Best now" summary for context TFs & WAIT plans)
             viewModelScope.launch(Dispatchers.Default) {
@@ -2124,6 +2214,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.value = _uiState.value.copy(feedbackMessage = null)
     }
 
+    fun setFeedback(message: String) {
+        _uiState.value = _uiState.value.copy(feedbackMessage = message)
+    }
+
     // --- Day-Trader Pack v1 Pipeline & Actions ---
     private fun getMarketProfile(assetType: AssetType, marketType: TradingMarketType): MarketProfile {
         val stockWindows = _uiState.value.stockEntryWindows
@@ -2208,10 +2302,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         val vetoes = buildList {
             v2?.vetoReasons?.forEach { if (it.isNotBlank()) add(it) }
-            if (eventRisk?.hasNewsShock == true && eventRisk.symbol.equals(quote.symbol, ignoreCase = true)) {
-                val msg = "News shock (${eventRisk.shockSourceType ?: "Event"}): ${eventRisk.summaryText}"
-                if (none { it.contains("News shock", true) }) add(msg)
-            }
             if (isEmpty() && effectiveVerdict == SignalVerdictState.NO_TRADE && setup?.unavailableReason?.isNotBlank() == true) {
                 add(setup.unavailableReason)
             }
@@ -2771,5 +2861,244 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 feedbackMessage = "Paper & real trade ledger cleared"
             )
         }
+    }
+
+    // =========================================================================
+    // MASTER VERDICT v1 (Parts A, B, C) Actions
+    // =========================================================================
+
+    fun refreshMasterVerdict(
+        quote: MarketQuote? = _uiState.value.currentQuote,
+        marketType: TradingMarketType = _uiState.value.selectedMarketType,
+        closedTimeframe: Timeframe? = null,
+        forceRefresh: Boolean = false
+    ) {
+        val activeQuote = quote ?: return
+        masterVerdictJob?.cancel()
+        masterVerdictJob = viewModelScope.launch(Dispatchers.IO) {
+            _uiState.value = _uiState.value.copy(isLoadingMasterVerdict = true)
+            val state = _uiState.value
+            val synth = state.agentSynthesis
+            val evaluated = runCatching {
+                analysisCoordinator.evaluateSymbol(
+                    symbol = activeQuote.symbol,
+                    assetType = activeQuote.assetType,
+                    marketType = marketType,
+                    livePriceHint = activeQuote.currentPrice,
+                    isBackground = false,
+                    closedTimeframe = closedTimeframe,
+                    forceRefresh = forceRefresh,
+                    offHoursMode = state.offHoursMode,
+                    riskSettings = state.riskSettings,
+                    aiShiftPoints = synth?.aiShiftPoints ?: 0,
+                    aiShiftModelName = synth?.aiShiftModelName,
+                    aiSummary = synth?.unifiedConsensusSummary?.takeIf { !state.isEngineOnly && it.isNotBlank() }
+                )
+            }.getOrNull()
+
+            if (_uiState.value.selectedSymbol.equals(activeQuote.symbol, ignoreCase = true)) {
+                _uiState.value = _uiState.value.copy(
+                    masterVerdict = evaluated ?: _uiState.value.masterVerdict,
+                    isLoadingMasterVerdict = false,
+                    backgroundDiagnostics = BackgroundPreferences.getDiagnostics(getApplication())
+                )
+            } else {
+                _uiState.value = _uiState.value.copy(isLoadingMasterVerdict = false)
+            }
+        }
+    }
+
+    fun selectHorizon(horizon: TradingHorizon) {
+        if (horizon == TradingHorizon.OUTLOOK) {
+            _uiState.value = _uiState.value.copy(selectedHorizon = horizon)
+            return
+        }
+        val targetTf = _uiState.value.horizonSettings.tripletFor(horizon).setupTf
+        _uiState.value = _uiState.value.copy(selectedHorizon = horizon)
+        if (_uiState.value.selectedTimeframe != targetTf) {
+            setTimeframe(targetTf)
+        }
+    }
+
+    fun updateHorizonSettings(settings: HorizonSettings) {
+        BackgroundPreferences.setHorizonSettings(getApplication(), settings)
+        _uiState.value = _uiState.value.copy(
+            horizonSettings = settings,
+            feedbackMessage = "Horizon timeframe triplets updated"
+        )
+        refreshMasterVerdict(forceRefresh = true)
+    }
+
+    private fun applyBackgroundMonitorSchedule(mode: BackgroundMonitorMode) {
+        val appCtx = getApplication<Application>()
+        when (mode) {
+            BackgroundMonitorMode.OFF -> {
+                MarketMonitorWorker.cancel(appCtx)
+                LiveMarketMonitorService.stop(appCtx)
+            }
+            BackgroundMonitorMode.STANDARD -> {
+                LiveMarketMonitorService.stop(appCtx)
+                MarketMonitorWorker.scheduleStandard(appCtx)
+            }
+            BackgroundMonitorMode.LIVE -> {
+                MarketMonitorWorker.scheduleStandard(appCtx)
+                val started = LiveMarketMonitorService.startSafely(appCtx)
+                if (!started) {
+                    _uiState.value = _uiState.value.copy(
+                        feedbackMessage = "Live monitor requires foreground permission; running Standard 15m Worker fallback."
+                    )
+                }
+            }
+        }
+    }
+
+    fun setBackgroundMonitorMode(mode: BackgroundMonitorMode) {
+        val appCtx = getApplication<Application>()
+        BackgroundPreferences.setMode(appCtx, mode)
+        _uiState.value = _uiState.value.copy(
+            backgroundMonitorMode = mode,
+            feedbackMessage = "Background monitor: ${mode.label}"
+        )
+        applyBackgroundMonitorSchedule(mode)
+    }
+
+    fun setQuietHours(config: QuietHoursConfig) {
+        BackgroundPreferences.setQuietHours(getApplication(), config)
+        _uiState.value = _uiState.value.copy(
+            quietHoursConfig = config,
+            feedbackMessage = if (config.enabled) "Quiet hours active (${config.startHour}:00–${config.endHour}:00)" else "Quiet hours disabled"
+        )
+    }
+
+    fun setAllowBgOnBatterySaver(allow: Boolean) {
+        BackgroundPreferences.setAllowOnBatterySaver(getApplication(), allow)
+        _uiState.value = _uiState.value.copy(
+            allowBgOnBatterySaver = allow,
+            feedbackMessage = if (allow) "Background updates allowed on Battery Saver" else "Paused automatically when Battery Saver is active"
+        )
+    }
+
+    fun forceRecomputeWatchlist() {
+        if (_uiState.value.isRefreshingWatchlist) return
+        _uiState.value = _uiState.value.copy(isRefreshingWatchlist = true)
+        viewModelScope.launch(Dispatchers.IO) {
+            val summary = runCatching {
+                analysisCoordinator.runBackgroundWatchlistCycle(maxSymbolsPerRun = 10)
+            }.getOrNull()
+            val diag = BackgroundPreferences.getDiagnostics(getApplication())
+            _uiState.value = _uiState.value.copy(
+                isRefreshingWatchlist = false,
+                backgroundDiagnostics = diag,
+                feedbackMessage = summary?.let {
+                    "Watchlist refreshed: ${it.evaluatedCount} evaluated, ${it.skippedUnchangedCount} unchanged"
+                } ?: "Watchlist refresh completed"
+            )
+        }
+    }
+
+    fun armHorizonAlert(horizon: TradingHorizon) {
+        val verdict = _uiState.value.masterVerdict ?: return
+        val plan = verdict.horizonPlans[horizon] ?: return
+        val existingId = "${verdict.symbol}_${verdict.marketType.name}_${horizon.name}"
+        val alreadyArmed = _uiState.value.armedPlans.any { it.id == existingId }
+        viewModelScope.launch(Dispatchers.IO) {
+            if (alreadyArmed) {
+                repository.deleteArmedPlan(existingId)
+                _uiState.value = _uiState.value.copy(
+                    feedbackMessage = "Disarmed ${horizon.label} alert on ${verdict.symbol}"
+                )
+            } else {
+                val entity = ArmedPlanEntity(
+                    id = existingId,
+                    symbol = verdict.symbol,
+                    marketType = verdict.marketType.name,
+                    horizon = horizon.name,
+                    side = (plan.side ?: PositionSide.LONG).name,
+                    mode = "ARMED_ALERT",
+                    entryZoneMin = plan.entryZoneMin ?: plan.limitPrice ?: verdict.livePrice,
+                    entryZoneMax = plan.entryZoneMax ?: plan.limitPrice ?: verdict.livePrice,
+                    triggerPrice = plan.triggerPrice ?: plan.limitPrice ?: verdict.livePrice,
+                    triggerCondition = plan.triggerCondition,
+                    stopLoss = plan.stopLoss ?: 0.0,
+                    tp1 = plan.tp1 ?: 0.0,
+                    tp2 = plan.tp2 ?: 0.0,
+                    tp3 = plan.tp3 ?: 0.0,
+                    entryModel = plan.entryModel,
+                    grade = plan.grade.name.take(1),
+                    validUntilMs = plan.validUntilMs
+                )
+                repository.upsertArmedPlan(entity)
+                _uiState.value = _uiState.value.copy(
+                    feedbackMessage = "Armed ${horizon.label} alert for ${verdict.symbol} (${plan.formatZoneOrDash()})"
+                )
+            }
+        }
+    }
+
+    fun paperFollowHorizon(horizon: TradingHorizon) {
+        val verdict = _uiState.value.masterVerdict ?: return
+        val plan = verdict.horizonPlans[horizon] ?: return
+        val entityId = "${verdict.symbol}_${verdict.marketType.name}_${horizon.name}"
+        viewModelScope.launch(Dispatchers.IO) {
+            val entity = ArmedPlanEntity(
+                id = entityId,
+                symbol = verdict.symbol,
+                marketType = verdict.marketType.name,
+                horizon = horizon.name,
+                side = (plan.side ?: PositionSide.LONG).name,
+                mode = "PAPER_FOLLOW",
+                entryZoneMin = plan.entryZoneMin ?: plan.limitPrice ?: verdict.livePrice,
+                entryZoneMax = plan.entryZoneMax ?: plan.limitPrice ?: verdict.livePrice,
+                triggerPrice = plan.triggerPrice ?: plan.limitPrice ?: verdict.livePrice,
+                triggerCondition = plan.triggerCondition,
+                stopLoss = plan.stopLoss ?: 0.0,
+                tp1 = plan.tp1 ?: 0.0,
+                tp2 = plan.tp2 ?: 0.0,
+                tp3 = plan.tp3 ?: 0.0,
+                entryModel = plan.entryModel,
+                grade = plan.grade.name.take(1),
+                validUntilMs = plan.validUntilMs
+            )
+            repository.upsertArmedPlan(entity)
+            _uiState.value = _uiState.value.copy(
+                feedbackMessage = "Paper-following ${verdict.symbol} ${horizon.label} (${plan.entryModel}) — outcomes will update calibration"
+            )
+        }
+    }
+
+    fun toggleFuturesForShort() {
+        val quote = _uiState.value.currentQuote ?: return
+        _uiState.value = _uiState.value.copy(
+            selectedMarketType = TradingMarketType.FUTURES,
+            positionSetupSide = PositionSide.SHORT,
+            feedbackMessage = "Switched to Perpetual Futures SHORT for ${quote.symbol}"
+        )
+        executeUnifiedQuery(quote.symbol, explicitMarketType = TradingMarketType.FUTURES, explicitAssetType = quote.assetType)
+    }
+
+    fun openFromNotification(symbol: String, horizonName: String?) {
+        val clean = symbol.trim().uppercase(Locale.US)
+        if (clean.isBlank()) return
+        val parsedHorizon = horizonName?.let { h ->
+            runCatching { TradingHorizon.valueOf(h) }.getOrNull()
+        } ?: _uiState.value.selectedHorizon
+        val setupTf = if (parsedHorizon != TradingHorizon.OUTLOOK) {
+            _uiState.value.horizonSettings.tripletFor(parsedHorizon).setupTf
+        } else _uiState.value.selectedTimeframe
+        _uiState.value = _uiState.value.copy(
+            currentScreen = AppScreen.TERMINAL,
+            selectedHorizon = parsedHorizon,
+            selectedTimeframe = setupTf
+        )
+        executeUnifiedQuery(clean)
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        klineWsClient.disconnect()
+        liveTickerJob?.cancel()
+        replayJob?.cancel()
+        fundamentalsJob?.cancel()
+        masterVerdictJob?.cancel()
     }
 }

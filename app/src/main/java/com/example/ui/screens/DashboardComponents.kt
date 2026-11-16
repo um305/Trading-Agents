@@ -1118,8 +1118,9 @@ fun ExecutiveDecisionResultCard(
             .padding(16.dp)
     ) {
         Column {
-            // Signal Engine v2 Verdict Banner
-            Box(
+            if (uiState.masterVerdict == null) {
+                // Signal Engine v2 Verdict Banner
+                Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(8.dp))
@@ -1387,6 +1388,7 @@ fun ExecutiveDecisionResultCard(
                         lineHeight = 12.sp
                     )
                 }
+            }
             }
 
             // Session & Gap-Risk Banner if Off-Hours
@@ -1703,7 +1705,8 @@ fun ExecutiveDecisionResultCard(
                                         text = when {
                                             isStopped -> "STOPPED"
                                             isTpHit -> "TP1 HIT"
-                                            isInZone -> "IN ZONE"
+                                            isInZone && isTradeArmed -> "IN ZONE"
+                                            isInZone -> "AT ZONE (WAIT)"
                                             else -> "UPCOMING"
                                         },
                                         color = if (isStopped) BearishRed else bannerColor,
@@ -1809,7 +1812,8 @@ fun ExecutiveDecisionResultCard(
                 Spacer(modifier = Modifier.height(6.dp))
                 ScenarioPairRow(
                     bullScenario = displayedBullScenario,
-                    bearScenario = displayedBearScenario
+                    bearScenario = displayedBearScenario,
+                    currentPrice = livePrice
                 )
 
                 // Explicit FAQ Timing Callout
@@ -2345,7 +2349,7 @@ fun ExecutiveDecisionResultCard(
                                                 text = when (l) {
                                                     2 -> "Safe"
                                                     5 -> "Swing"
-                                                    10 -> "AI Rec"
+                                                    10 -> if (uiState.isEngineOnly) "Engine rec" else "AI Rec"
                                                     20 -> "Fast"
                                                     50 -> "High"
                                                     else -> "Extreme"
@@ -2415,7 +2419,11 @@ fun ExecutiveDecisionResultCard(
                                 text = when (lev) {
                                     2 -> "2x Leverage: Ultra-safe buffer (~50% room). Minimal liquidation risk."
                                     5 -> "5x Leverage: Conservative margin (~20% buffer). Suitable for swing positions."
-                                    10 -> "10x Leverage [AI Recommended]: Optimal risk-to-reward balance. Generates +${formatPrice(gain1 * 10)}% on TP1 while keeping 9.5% buffer."
+                                    10 -> if (uiState.isEngineOnly) {
+                                        "10x Leverage [Engine Recommended]: Optimal risk-to-reward balance. Generates +${formatPrice(gain1 * 10)}% on TP1 while keeping 9.5% buffer."
+                                    } else {
+                                        "10x Leverage [AI Recommended]: Optimal risk-to-reward balance. Generates +${formatPrice(gain1 * 10)}% on TP1 while keeping 9.5% buffer."
+                                    }
                                     20 -> "20x Leverage: High volatility risk. Generates +${formatPrice(gain1 * 20)}% on TP1. Requires strict stop loss execution."
                                     50 -> "50x Leverage: Extreme leverage. Generates +${formatPrice(gain1 * 50)}% on TP1. Liquidation occurs at ~1.8% adverse price wick."
                                     else -> "100x Leverage: Maximum leverage scalp. Generates +${formatPrice(gain1 * 100)}% on TP1. Liquidation occurs at ~0.9% adverse wick."
@@ -2501,11 +2509,19 @@ fun ExecutiveDecisionResultCard(
                     val nearestBullOb = smcData.activeOrderBlocks.filter { it.type == com.example.domain.model.OrderBlockType.BULLISH_DEMAND_BLOCK }.maxByOrNull { it.top }
                     val nearestBearOb = smcData.activeOrderBlocks.filter { it.type == com.example.domain.model.OrderBlockType.BEARISH_SUPPLY_BLOCK }.minByOrNull { it.bottom }
                     val nearestFvg = smcData.activeFVGs.firstOrNull()
-                    val bslPool = smcData.liquidityPools.firstOrNull { it.type == com.example.domain.model.LiquidityType.BUY_SIDE_LIQUIDITY_BSL }
-                    val sslPool = smcData.liquidityPools.firstOrNull { it.type == com.example.domain.model.LiquidityType.SELL_SIDE_LIQUIDITY_SSL }
+                    val bslPool = smcData.liquidityPools
+                        .filter { it.type == com.example.domain.model.LiquidityType.BUY_SIDE_LIQUIDITY_BSL && it.priceLevel > quote.currentPrice }
+                        .minByOrNull { it.priceLevel }
+                    val sslPool = smcData.liquidityPools
+                        .filter { it.type == com.example.domain.model.LiquidityType.SELL_SIDE_LIQUIDITY_SSL && it.priceLevel < quote.currentPrice }
+                        .maxByOrNull { it.priceLevel }
 
-                    val bsl = bslPool?.priceLevel?.takeIf { it > 0.0 } ?: setup?.takeProfit1?.takeIf { it > 0.0 } ?: maxOf(quote.dayHigh, quote.currentPrice * 1.035)
-                    val ssl = sslPool?.priceLevel?.takeIf { it > 0.0 } ?: setup?.stopLoss?.takeIf { it > 0.0 } ?: minOf(quote.dayLow, quote.currentPrice * 0.965)
+                    val bsl = bslPool?.priceLevel?.takeIf { it > quote.currentPrice }
+                        ?: setup?.takeProfit1?.takeIf { it > quote.currentPrice }
+                        ?: maxOf(quote.dayHigh, quote.currentPrice * 1.035)
+                    val ssl = sslPool?.priceLevel?.takeIf { it > 0.0 && it < quote.currentPrice }
+                        ?: setup?.stopLoss?.takeIf { it > 0.0 && it < quote.currentPrice }
+                        ?: minOf(quote.dayLow, quote.currentPrice * 0.965)
 
                     val structVal = if (isMixed) {
                         "MIXED (swing ${if (swingIsBearish) "bearish" else "bullish"} / internal ${if (internalIsBullish) "bullish" else "bearish"})"
@@ -2529,7 +2545,7 @@ fun ExecutiveDecisionResultCard(
                     )
 
                     ResponsiveKeyValueRow(
-                        label = "Order Flow Structure:",
+                        label = "Price action flow:",
                         value = smcData.smcStructureTrend,
                         valueColor = TechCyan,
                         valueFontWeight = FontWeight.Bold
@@ -3045,8 +3061,17 @@ fun SignalFamilyChipRow(
 fun ScenarioPairRow(
     bullScenario: com.example.domain.model.ScenarioPlan,
     bearScenario: com.example.domain.model.ScenarioPlan,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    currentPrice: Double = 0.0
 ) {
+    fun fmtWithPct(level: Double): String {
+        if (!level.isFinite() || level <= 0.0) return "-"
+        val base = PriceFormatter.formatCurrency(level)
+        if (currentPrice <= 0.0 || !currentPrice.isFinite()) return base
+        val pct = ((level - currentPrice) / currentPrice) * 100.0
+        return "$base (${PriceFormatter.formatSignedPercent(pct)})"
+    }
+
     Row(
         modifier = modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -3059,12 +3084,12 @@ fun ScenarioPairRow(
                 .border(1.dp, BullishGreen.copy(alpha = 0.35f), RoundedCornerShape(6.dp))
                 .padding(8.dp)
         ) {
-            Text("BULL SCENARIO", color = BullishGreen, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+            Text("BULL SCENARIO (LONG)", color = BullishGreen, fontSize = 8.sp, fontWeight = FontWeight.Bold)
             Spacer(modifier = Modifier.height(2.dp))
             Text(bullScenario.triggerCondition, color = TextSecondary, fontSize = 8.sp, lineHeight = 11.sp)
             Spacer(modifier = Modifier.height(3.dp))
             Text(
-                text = "Invalidation: ${PriceFormatter.formatCurrency(bullScenario.invalidationLevel)} • Target: ${PriceFormatter.formatCurrency(bullScenario.targetLevel)}",
+                text = "Inv: ${fmtWithPct(bullScenario.invalidationLevel)} • Tgt: ${fmtWithPct(bullScenario.targetLevel)}",
                 color = TextMuted,
                 fontSize = 7.sp
             )
@@ -3077,12 +3102,12 @@ fun ScenarioPairRow(
                 .border(1.dp, BearishRed.copy(alpha = 0.35f), RoundedCornerShape(6.dp))
                 .padding(8.dp)
         ) {
-            Text("BEAR SCENARIO", color = BearishRed, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+            Text("BEAR SCENARIO (SHORT)", color = BearishRed, fontSize = 8.sp, fontWeight = FontWeight.Bold)
             Spacer(modifier = Modifier.height(2.dp))
             Text(bearScenario.triggerCondition, color = TextSecondary, fontSize = 8.sp, lineHeight = 11.sp)
             Spacer(modifier = Modifier.height(3.dp))
             Text(
-                text = "Invalidation: ${PriceFormatter.formatCurrency(bearScenario.invalidationLevel)} • Target: ${PriceFormatter.formatCurrency(bearScenario.targetLevel)}",
+                text = "Inv: ${fmtWithPct(bearScenario.invalidationLevel)} • Tgt: ${fmtWithPct(bearScenario.targetLevel)}",
                 color = TextMuted,
                 fontSize = 7.sp
             )
@@ -3181,7 +3206,8 @@ fun NoPlanCard(
 
         ScenarioPairRow(
             bullScenario = verdictState.bullScenario,
-            bearScenario = verdictState.bearScenario
+            bearScenario = verdictState.bearScenario,
+            currentPrice = verdictState.livePrice
         )
 
         if (onRunHypotheticalReplay != null) {

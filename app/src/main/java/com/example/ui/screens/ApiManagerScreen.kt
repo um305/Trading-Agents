@@ -1,7 +1,12 @@
 package com.example.ui.screens
 
+import android.Manifest
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -44,6 +49,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -75,7 +81,12 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.background.BackgroundMonitorMode
+import com.example.data.background.QuietHoursConfig
 import com.example.domain.ai.CompanyDiscoveryEngine
+import com.example.domain.master.HorizonSettings
+import com.example.domain.master.HorizonTripletConfig
+import com.example.domain.master.TradingHorizon
 import com.example.domain.model.AiCompanyConfig
 import com.example.domain.model.CompanyDefinition
 import com.example.domain.model.CompanyStatus
@@ -85,6 +96,7 @@ import com.example.domain.model.LoadBalancingMode
 import com.example.domain.model.ModelTier
 import com.example.domain.model.OffHoursMode
 import com.example.domain.model.SupportedCompanies
+import com.example.domain.model.Timeframe
 import com.example.ui.MainViewModel
 import com.example.ui.UiState
 import com.example.ui.theme.AgentPurple
@@ -549,6 +561,26 @@ fun ApiManagerScreen(
                 }
             }
         }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // Horizon Triplet Settings (Scalp, Intraday, Swing, Position)
+        HorizonTripletSettingsCard(
+            settings = uiState.horizonSettings,
+            onUpdateSettings = { viewModel.updateHorizonSettings(it) }
+        )
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // Background Monitoring, Quiet Hours, Battery & Notifications
+        BackgroundMonitoringSettingsCard(
+            uiState = uiState,
+            hasNotificationPermission = viewModel.notificationManager.hasNotificationPermission(),
+            onSelectMode = { viewModel.setBackgroundMonitorMode(it) },
+            onToggleBatterySaverOverride = { viewModel.setAllowBgOnBatterySaver(it) },
+            onUpdateQuietHours = { viewModel.setQuietHours(it) },
+            onFeedback = { viewModel.setFeedback(it) }
+        )
 
         Spacer(modifier = Modifier.height(10.dp))
 
@@ -1275,4 +1307,415 @@ fun ConnectCompaniesDialog(
         },
         containerColor = DarkSurface
     )
+}
+
+@Composable
+private fun HorizonTripletSettingsCard(
+    settings: HorizonSettings,
+    onUpdateSettings: (HorizonSettings) -> Unit
+) {
+    val allowedTfs = listOf(
+        Timeframe.FIVE_MIN,
+        Timeframe.FIFTEEN_MIN,
+        Timeframe.THIRTY_MIN,
+        Timeframe.ONE_HOUR,
+        Timeframe.FOUR_HOURS,
+        Timeframe.ONE_DAY,
+        Timeframe.FIVE_DAYS
+    )
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("horizon_settings_card"),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder),
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Master Horizon Timeframe Triplets",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TechCyan
+                    )
+                    Text(
+                        text = "Configure Bias • Setup • Trigger timeframes per horizon",
+                        fontSize = 10.sp,
+                        color = TextMuted
+                    )
+                }
+                TextButton(
+                    onClick = { onUpdateSettings(HorizonSettings()) },
+                    modifier = Modifier.testTag("btn_reset_horizons")
+                ) {
+                    Text("Reset", fontSize = 10.sp, color = TechCyan, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            TradingHorizon.ACTIONABLE.forEach { horizon ->
+                val cfg = settings.tripletFor(horizon)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(DarkSurfaceElevated)
+                        .border(1.dp, DarkBorder, RoundedCornerShape(8.dp))
+                        .padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "${horizon.label} (${horizon.holdLabel})",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        TimeframeDropdownChip(
+                            label = "Bias",
+                            selected = cfg.biasTf,
+                            options = allowedTfs,
+                            tag = "tf_bias_${horizon.name.lowercase()}",
+                            onSelect = { tf ->
+                                val next = cfg.copy(biasTf = tf)
+                                onUpdateSettings(settingsWithTriplet(settings, horizon, next))
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        TimeframeDropdownChip(
+                            label = "Setup",
+                            selected = cfg.setupTf,
+                            options = allowedTfs,
+                            tag = "tf_setup_${horizon.name.lowercase()}",
+                            onSelect = { tf ->
+                                val next = cfg.copy(setupTf = tf)
+                                onUpdateSettings(settingsWithTriplet(settings, horizon, next))
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        TimeframeDropdownChip(
+                            label = "Trigger",
+                            selected = cfg.triggerTf,
+                            options = allowedTfs,
+                            tag = "tf_trigger_${horizon.name.lowercase()}",
+                            onSelect = { tf ->
+                                val next = cfg.copy(triggerTf = tf)
+                                onUpdateSettings(settingsWithTriplet(settings, horizon, next))
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun settingsWithTriplet(
+    current: HorizonSettings,
+    horizon: TradingHorizon,
+    triplet: HorizonTripletConfig
+): HorizonSettings = when (horizon) {
+    TradingHorizon.SCALP -> current.copy(scalp = triplet)
+    TradingHorizon.INTRADAY -> current.copy(intraday = triplet)
+    TradingHorizon.SWING -> current.copy(swing = triplet)
+    TradingHorizon.POSITION -> current.copy(position = triplet)
+    TradingHorizon.OUTLOOK -> current
+}
+
+@Composable
+private fun TimeframeDropdownChip(
+    label: String,
+    selected: Timeframe,
+    options: List<Timeframe>,
+    tag: String,
+    onSelect: (Timeframe) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box(modifier = modifier) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .background(DarkSurface)
+                .border(1.dp, DarkBorder, RoundedCornerShape(6.dp))
+                .clickable { expanded = true }
+                .padding(horizontal = 8.dp, vertical = 8.dp)
+                .testTag(tag)
+        ) {
+            Text(label, fontSize = 8.sp, color = TextMuted)
+            Text(selected.label, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TechCyan)
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            options.forEach { tf ->
+                DropdownMenuItem(
+                    text = { Text(tf.label, fontSize = 12.sp) },
+                    onClick = {
+                        expanded = false
+                        onSelect(tf)
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BackgroundMonitoringSettingsCard(
+    uiState: UiState,
+    hasNotificationPermission: Boolean,
+    onSelectMode: (BackgroundMonitorMode) -> Unit,
+    onToggleBatterySaverOverride: (Boolean) -> Unit,
+    onUpdateQuietHours: (QuietHoursConfig) -> Unit,
+    onFeedback: (String) -> Unit
+) {
+    val context = LocalContext.current
+    var permissionGranted by remember(hasNotificationPermission) { mutableStateOf(hasNotificationPermission) }
+    val notifPermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        permissionGranted = granted
+        onFeedback(if (granted) "Notification permission granted" else "Notification permission denied — enable in Android Settings")
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("background_monitoring_settings_card"),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder),
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = "Background Monitoring & Quiet Hours",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = AgentPurple
+            )
+
+            BackgroundMonitorMode.values().forEach { mode ->
+                val isSelected = uiState.backgroundMonitorMode == mode
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (isSelected) AgentPurple.copy(alpha = 0.14f) else DarkSurfaceElevated)
+                        .border(1.dp, if (isSelected) AgentPurple else DarkBorder, RoundedCornerShape(8.dp))
+                        .clickable { onSelectMode(mode) }
+                        .padding(10.dp)
+                        .testTag("bg_mode_${mode.name.lowercase()}")
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = mode.label,
+                            color = if (isSelected) AgentPurple else TextPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        if (isSelected) {
+                            Text("ACTIVE", color = BullishGreen, fontSize = 9.sp, fontWeight = FontWeight.ExtraBold)
+                        }
+                    }
+                    Text(
+                        text = mode.description,
+                        color = TextMuted,
+                        fontSize = 9.sp,
+                        lineHeight = 13.sp
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Allow background runs during Battery Saver",
+                        color = TextPrimary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Default off to respect Android power saving.",
+                        color = TextMuted,
+                        fontSize = 9.sp
+                    )
+                }
+                Switch(
+                    checked = uiState.allowBgOnBatterySaver,
+                    onCheckedChange = onToggleBatterySaverOverride,
+                    colors = SwitchDefaults.colors(checkedThumbColor = TechCyan),
+                    modifier = Modifier.testTag("switch_battery_saver_override")
+                )
+            }
+
+            val quiet = uiState.quietHoursConfig
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Quiet Hours (Mute background alerts)",
+                        color = TextPrimary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = if (quiet.enabled) "${quiet.startHour}:00 to ${quiet.endHour}:00 muted (max 6/hr otherwise)" else "Alerts allowed 24h (max 6/hr, 30m/symbol cooldown)",
+                        color = TextMuted,
+                        fontSize = 9.sp
+                    )
+                }
+                Switch(
+                    checked = quiet.enabled,
+                    onCheckedChange = { enabled -> onUpdateQuietHours(quiet.copy(enabled = enabled)) },
+                    colors = SwitchDefaults.colors(checkedThumbColor = RiskAmber),
+                    modifier = Modifier.testTag("switch_quiet_hours")
+                )
+            }
+
+            if (quiet.enabled) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    HourStepperChip(
+                        label = "Start",
+                        hour = quiet.startHour,
+                        tag = "quiet_hours_start_row",
+                        onChangeHour = { h -> onUpdateQuietHours(quiet.copy(startHour = h)) },
+                        modifier = Modifier.weight(1f)
+                    )
+                    HourStepperChip(
+                        label = "End",
+                        hour = quiet.endHour,
+                        tag = "quiet_hours_end_row",
+                        onChangeHour = { h -> onUpdateQuietHours(quiet.copy(endHour = h)) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        } else {
+                            onFeedback("Notifications enabled on this Android version")
+                        }
+                    },
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("btn_request_notifications")
+                ) {
+                    Text(
+                        text = if (permissionGranted) "Notifications: On" else "Enable Alerts",
+                        color = if (permissionGranted) BullishGreen else RiskAmber,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        try {
+                            val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                            context.startActivity(intent)
+                        } catch (_: Exception) {
+                            onFeedback("Open Android Settings > Battery > TradingAgents to adjust optimization")
+                        }
+                    },
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("btn_battery_optimization_settings")
+                ) {
+                    Text(
+                        text = "Battery Settings",
+                        color = TechCyan,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            val bgDiag = uiState.backgroundDiagnostics
+            val lastRunLabel = if (bgDiag.lastRunAtMs > 0L) {
+                val mins = ((System.currentTimeMillis() - bgDiag.lastRunAtMs) / 60_000L).coerceAtLeast(0L)
+                "${mins}m ago (${bgDiag.symbolsCovered} symbols, ${bgDiag.lastDurationMs}ms)"
+            } else "Not yet run in background"
+            Text(
+                text = "Background Diag: $lastRunLabel",
+                color = TextSecondary,
+                fontSize = 9.sp
+            )
+            if (bgDiag.recentErrors.isNotEmpty()) {
+                Text(
+                    text = "Recent BG Note: ${bgDiag.recentErrors.first()}",
+                    color = RiskAmber,
+                    fontSize = 9.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HourStepperChip(
+    label: String,
+    hour: Int,
+    tag: String,
+    onChangeHour: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(DarkSurfaceElevated)
+            .border(1.dp, DarkBorder, RoundedCornerShape(6.dp))
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .testTag(tag),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        TextButton(onClick = { onChangeHour((hour + 23) % 24) }) {
+            Text("-", color = TechCyan, fontWeight = FontWeight.Bold)
+        }
+        Text("$label: ${String.format(java.util.Locale.US, "%02d:00", hour)}", color = TextPrimary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+        TextButton(onClick = { onChangeHour((hour + 1) % 24) }) {
+            Text("+", color = TechCyan, fontWeight = FontWeight.Bold)
+        }
+    }
 }

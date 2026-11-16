@@ -215,7 +215,7 @@ class UiStringLintRobolectricTest {
             plan = sampleTradePlan(SignalVerdictState.TRADE),
             bullScenario = bull,
             bearScenario = bear,
-            evidence = SignalEvidence("A Trend Pullback", "Trending", MarketSessionStatus.OPEN, 42, 61.9, 37.0, 24.9, Pair(46.8, 75.0), 0.42, 4.0, false),
+            evidence = SignalEvidence("A Trend Pullback", "Trending", MarketSessionStatus.OPEN, 42, 26, 61.9, 37.0, 24.9, Pair(46.8, 75.0), 0.42, 4.0, false),
             oneLineWhy = "TRADE [Grade A]: Aligned trend continuation.",
             sessionStatus = MarketSessionStatus.OPEN,
             livePrice = 112.0,
@@ -230,7 +230,7 @@ class UiStringLintRobolectricTest {
             softFlags = listOf(SoftFlag(SoftFlagType.OUTSIDE_ENTRY_WINDOW, "Outside entry window (opens at 14:00)", "Timing hold", "Alert ready")),
             needsCondition = "needs: RVOL >= 1.2 or entry window open",
             routedViaFuturesShort = true,
-            evidence = SignalEvidence("D Range Fade", "Range", MarketSessionStatus.OPEN, 14, 37.0, 37.0, 0.0, Pair(17.0, 62.0), -0.05, 4.0, true),
+            evidence = SignalEvidence("D Range Fade", "Range", MarketSessionStatus.OPEN, 14, 5, 37.0, 37.0, 0.0, Pair(17.0, 62.0), -0.05, 4.0, true),
             aiShiftPoints = 0,
             aiShiftModelName = null,
             bestTimeframeSummary = BestTimeframeSummary(Timeframe.FOUR_HOURS, PositionSide.LONG, "A Trend Pullback", SetupGrade.B, "Best now: 4h LONG A Trend Pullback, Grade B", "1h waiting for entry window")

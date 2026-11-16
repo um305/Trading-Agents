@@ -35,13 +35,17 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.graphics.Color
 import com.example.domain.model.AssetType
 import com.example.domain.model.TradingMarketType
+import com.example.domain.master.TradingHorizon
 import com.example.ui.AppScreen
 import com.example.ui.MainViewModel
 import com.example.ui.UiState
 import com.example.ui.adaptive.AdaptiveLayoutUtils
+import com.example.ui.components.AgentMatrixGrid
 import com.example.ui.components.CandlestickChart
 import com.example.ui.components.DayTraderAlertBanner
 import com.example.ui.components.ExchangeSourceSelector
+import com.example.ui.components.HorizonLadderTable
+import com.example.ui.components.MasterVerdictCard
 import com.example.ui.theme.AgentPurple
 import com.example.ui.theme.BullishGreen
 import com.example.ui.theme.DarkBackground
@@ -187,6 +191,36 @@ fun DashboardScreen(
                         Spacer(modifier = Modifier.height(12.dp))
                     }
 
+                    uiState.masterVerdict?.let { mv ->
+                        val isArmed = uiState.armedPlans.any {
+                            it.symbol.equals(mv.symbol, true) &&
+                                it.marketType == mv.marketType.name &&
+                                it.horizon == uiState.selectedHorizon.name
+                        }
+                        MasterVerdictCard(
+                            verdict = mv,
+                            selectedHorizon = uiState.selectedHorizon,
+                            isArmedForSelectedHorizon = isArmed,
+                            futuresPerpAvailable = uiState.futuresPerpAvailableForSymbol,
+                            isEngineOnly = uiState.isEngineOnly,
+                            onSelectHorizon = { viewModel.selectHorizon(it) },
+                            onArmAlert = { viewModel.armHorizonAlert(it) },
+                            onPaperFollow = { viewModel.paperFollowHorizon(it) },
+                            onSwitchToFuturesShort = { viewModel.toggleFuturesForShort() },
+                            onShareFeedback = { viewModel.setFeedback(it) }
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        HorizonLadderTable(
+                            verdict = mv,
+                            selectedHorizon = uiState.selectedHorizon,
+                            onSelectHorizon = { viewModel.selectHorizon(it) },
+                            onShareFeedback = { viewModel.setFeedback(it) }
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        AgentMatrixGrid(matrix = mv.matrix)
+                        Spacer(modifier = Modifier.height(12.dp))
+                    }
+
                     ExecutiveDecisionResultCard(
                         quote = quote,
                         synthesis = synthesis,
@@ -295,6 +329,36 @@ fun DashboardScreen(
                             onSelectExchange = { viewModel.setSelectedExchange(it) },
                             symbol = quote.symbol
                         )
+                        Spacer(modifier = Modifier.height(12.dp))
+                    }
+
+                    uiState.masterVerdict?.let { mv ->
+                        val isArmed = uiState.armedPlans.any {
+                            it.symbol.equals(mv.symbol, true) &&
+                                it.marketType == mv.marketType.name &&
+                                it.horizon == uiState.selectedHorizon.name
+                        }
+                        MasterVerdictCard(
+                            verdict = mv,
+                            selectedHorizon = uiState.selectedHorizon,
+                            isArmedForSelectedHorizon = isArmed,
+                            futuresPerpAvailable = uiState.futuresPerpAvailableForSymbol,
+                            isEngineOnly = uiState.isEngineOnly,
+                            onSelectHorizon = { viewModel.selectHorizon(it) },
+                            onArmAlert = { viewModel.armHorizonAlert(it) },
+                            onPaperFollow = { viewModel.paperFollowHorizon(it) },
+                            onSwitchToFuturesShort = { viewModel.toggleFuturesForShort() },
+                            onShareFeedback = { viewModel.setFeedback(it) }
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        HorizonLadderTable(
+                            verdict = mv,
+                            selectedHorizon = uiState.selectedHorizon,
+                            onSelectHorizon = { viewModel.selectHorizon(it) },
+                            onShareFeedback = { viewModel.setFeedback(it) }
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        AgentMatrixGrid(matrix = mv.matrix)
                         Spacer(modifier = Modifier.height(12.dp))
                     }
 
@@ -442,6 +506,8 @@ private fun ChartContainer(
                     showSma = true,
                     tradeSetupPlan = uiState.tradeSetupPlan,
                     currentPrice = quote.currentPrice,
+                    masterVerdict = uiState.masterVerdict,
+                    selectedHorizon = uiState.selectedHorizon,
                     onRecalculateSetup = onRecalculateSetup
                 )
             } else {

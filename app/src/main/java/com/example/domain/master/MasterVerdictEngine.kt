@@ -51,6 +51,7 @@ data class MasterVerdictInput(
     val replayPool: SessionPool? = null,
     val replayIterations: Int = 2_000,
     val seed: Long = ReplayEngine.DEFAULT_SEED,
+    val replayProvider: ((planHash: String, seed: Long, iterations: Int, runner: () -> ReplayResult) -> ReplayResult)? = null,
     val orderBook: OrderBookSnapshot? = null,
     val futuresData: CryptoFuturesData? = null,
     val news: List<NewsItem> = emptyList(),
@@ -603,7 +604,8 @@ object MasterVerdictEngine {
             seed = input.seed,
             numReplays = input.replayIterations,
             isFutures = input.marketType == TradingMarketType.FUTURES || !isLong,
-            nowMs = input.nowMs
+            nowMs = input.nowMs,
+            replayProvider = input.replayProvider
         )
 
         val evInfo = signalOut.evidence ?: SignalCalibrationEngine.getEvidenceForModel(
@@ -860,7 +862,8 @@ object MasterVerdictEngine {
         seed: Long,
         numReplays: Int,
         isFutures: Boolean,
-        nowMs: Long
+        nowMs: Long,
+        replayProvider: ((planHash: String, seed: Long, iterations: Int, runner: () -> ReplayResult) -> ReplayResult)? = null
     ): ReplayResult? {
         if (pool == null || !pool.isSufficient || entryPrice <= 0.0 || stopLoss <= 0.0 || tp1 <= 0.0) return null
         val pType = if (assetType == AssetType.STOCK) MarketProfileType.US_EQUITY else MarketProfileType.CRYPTO
@@ -891,14 +894,18 @@ object MasterVerdictEngine {
             fundingBpsPer8h = if (isFutures) 1.0 else 0.0,
             isEntryBarClosed = true
         )
-        return ReplayEngine.runReplay(
-            plan = rPlan,
-            pool = pool,
-            seed = seed,
-            numReplays = numReplays,
-            useBlockBootstrap = true,
-            useVolatilityScaling = true
-        )
+        val runner = {
+            ReplayEngine.runReplay(
+                plan = rPlan,
+                pool = pool,
+                seed = seed,
+                numReplays = numReplays,
+                useBlockBootstrap = true,
+                useVolatilityScaling = true
+            )
+        }
+        val planHash = "${cleanSymbol}_${horizon.name}_${side.name}_${String.format(Locale.US, "%.4f_%.4f_%.4f_%d", entryPrice, stopLoss, tp1, numReplays)}"
+        return replayProvider?.invoke(planHash, seed, numReplays, runner) ?: runner()
     }
 
     private fun buildOutlookSummary(
