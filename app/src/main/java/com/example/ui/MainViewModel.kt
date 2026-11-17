@@ -93,7 +93,15 @@ import com.example.domain.model.SetupGrade
 import com.example.domain.model.SignalVerdictState
 import com.example.domain.model.VerdictState
 import com.example.domain.util.PriceFormatter
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 import kotlin.random.Random
 
@@ -110,7 +118,7 @@ enum class AppScreen(val title: String) {
 data class UiState(
     val currentScreen: AppScreen = AppScreen.TERMINAL,
     val selectedSymbol: String = "NVDA",
-    val selectedTimeframe: Timeframe = Timeframe.ONE_MONTH,
+    val selectedTimeframe: Timeframe = Timeframe.ONE_HOUR,
     val selectedMarketType: TradingMarketType = TradingMarketType.SPOT,
     val selectedExchange: CryptoExchange = CryptoExchange.BINANCE,
     val exchangeQuotes: List<ExchangePriceQuote> = emptyList(),
@@ -218,6 +226,27 @@ data class UiState(
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
+    // STABILITY FIX: one safe scope for ALL work started by this ViewModel.
+    //  - runs OFF the UI thread, so the screen can never freeze while data loads
+    //  - runs one task at a time, so shared state is never touched by two threads at once
+    //  - any unexpected error is caught here (loading spinners are cleared) instead of crashing the app
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val viewModelScope: CoroutineScope = CoroutineScope(
+        SupervisorJob() +
+            Dispatchers.Default.limitedParallelism(1) +
+            CoroutineExceptionHandler { _, throwable ->
+                android.util.Log.e("MainViewModel", "Background task failed - app kept alive", throwable)
+                _uiState.update {
+                    it.copy(
+                        isLoadingQuote = false,
+                        isRunningAgents = false,
+                        agentRunningPhase = "",
+                        feedbackMessage = "Something went wrong (" + (throwable.message ?: throwable.javaClass.simpleName) + "). Tap refresh to retry."
+                    )
+                }
+            }
+    )
+
     private val repository = MarketRepository(application)
     private val prefs = application.getSharedPreferences("trading_agents_prefs", Context.MODE_PRIVATE)
     val notificationManager = PriceAlertNotificationManager(application)
@@ -229,7 +258,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var fundamentalsJob: Job? = null
     private var masterVerdictJob: Job? = null
     private var lastAlertedSymbolStatus: String = ""
-    private val _tradePlansCache = mutableMapOf<String, TradeSetupPlan>()
+    private val _tradePlansCache = java.util.concurrent.ConcurrentHashMap<String, TradeSetupPlan>()
     private fun getPlanCacheKey(symbol: String, marketType: TradingMarketType, timeframe: Timeframe) =
         "${symbol.uppercase()}_${marketType.name}_${timeframe.name}"
 
@@ -341,11 +370,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         applyBackgroundMonitorSchedule(BackgroundPreferences.getMode(getApplication()))
 
-        // Initial load
+        // Initial load - staggered so the phone is never asked to do everything at the same moment
         executeUnifiedQuery("NVDA")
-        scanCrypto(TradingMarketType.FUTURES)
-        runDayTraderScan("ALL")
         startLiveTicker()
+        viewModelScope.launch {
+            delay(8_000L)
+            scanCrypto(TradingMarketType.FUTURES)
+            delay(8_000L)
+            runDayTraderScan("ALL")
+        }
     }
 
     private fun loadPersistedPreferences() {
@@ -524,7 +557,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         liveTickerJob = viewModelScope.launch {
             var prevPrice = _uiState.value.currentQuote?.currentPrice ?: 0.0
             while (isActive) {
-                delay(2500)
+                delay(4000)
+                try {
                 if (!_uiState.value.isLiveTickingActive) continue
                 val current = _uiState.value.currentQuote ?: continue
                 if (current.currentPrice <= 0.0) continue
@@ -722,6 +756,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     liveTickDirection = tickDir,
                     liveTickCounter = _uiState.value.liveTickCounter + 1
                 )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    android.util.Log.w("MainViewModel", "Live tick skipped: " + e.message)
+                }
             }
         }
     }
@@ -1184,8 +1223,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 isLoadingQuote = true
             )
 
-            val quoteResult = repository.getQuote(symbol, timeframe, marketType, exchange, explicitAssetType)
-            val initialQuote = quoteResult.getOrNull()
+            val quoteResult = withTimeoutOrNull(30_000L) {
+                repository.getQuote(symbol, timeframe, marketType, exchange, explicitAssetType)
+            }
+            val initialQuote = quoteResult?.getOrNull()
 
             // Guard against out-of-order async responses
             if (symbol != _uiState.value.selectedSymbol ||
@@ -1197,15 +1238,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             if (initialQuote != null) {
-                val perpAvailable = repository.hasFuturesPerpMarket(initialQuote.symbol, initialQuote.assetType)
+                val perpAvailable = withTimeoutOrNull(8_000L) { repository.hasFuturesPerpMarket(initialQuote.symbol, initialQuote.assetType) } ?: false
                 val resolvedAssetTypeForNews = initialQuote.assetType
-                val news = repository.getNews(symbol, resolvedAssetTypeForNews)
-                val scannerResult = repository.scanNewsWithGemini(symbol, initialQuote.assetType, broadcastAllModels = false)
+                val news = withTimeoutOrNull(12_000L) { repository.getNews(symbol, resolvedAssetTypeForNews) } ?: emptyList()
+                val scannerResult = withTimeoutOrNull(10_000L) { repository.scanNewsWithGemini(symbol, initialQuote.assetType, broadcastAllModels = false) }
+                // Engine result first (fast). AI notes are added in the background afterwards.
                 val synthesis = repository.runAgentAnalysis(
                     quote = initialQuote,
                     news = news,
                     scannerResult = scannerResult,
-                    aiEnrichmentEnabled = _uiState.value.aiEnrichmentEnabled,
+                    aiEnrichmentEnabled = false,
                     balancingMode = _uiState.value.loadBalancingMode
                 )
 
@@ -1296,6 +1338,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 runDayTraderPipeline(quote, setup, news, synthesis)
                 refreshMasterVerdict(quote = quote, marketType = routedMarket)
+                enrichWithAiInBackground(quote, news, scannerResult, currentTf)
 
                 // Async best-timeframe triplet evaluation across 5m / 15m / 1h / 4h / 1D
                 viewModelScope.launch(Dispatchers.Default) {
@@ -1338,6 +1381,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     isLoadingQuote = false,
                     feedbackMessage = "Failed to load data for $symbol"
                 )
+            }
+        }
+    }
+
+    /**
+     * AI is optional and slow, so it never blocks the screen: the engine result is shown first,
+     * then the AI committee notes are added later (60 s maximum, otherwise they are simply skipped).
+     */
+    private fun enrichWithAiInBackground(
+        quote: MarketQuote,
+        news: List<NewsItem>,
+        scannerResult: NewsScannerResult?,
+        timeframe: Timeframe
+    ) {
+        if (!_uiState.value.aiEnrichmentEnabled || _uiState.value.connectedCompaniesCount == 0) return
+        viewModelScope.launch {
+            val enriched = withTimeoutOrNull(60_000L) {
+                repository.runAgentAnalysis(
+                    quote = quote,
+                    news = news,
+                    scannerResult = scannerResult,
+                    aiEnrichmentEnabled = true,
+                    balancingMode = _uiState.value.loadBalancingMode
+                )
+            } ?: return@launch
+            val state = _uiState.value
+            if (state.selectedSymbol.equals(quote.symbol, ignoreCase = true) && state.selectedTimeframe == timeframe) {
+                _uiState.update { it.copy(agentSynthesis = enriched) }
+                if (enriched.aiShiftPoints != 0) recalculateCurrentSetup()
             }
         }
     }
@@ -1764,14 +1836,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.value = _uiState.value.copy(
                 agentRunningPhase = "Connecting to market exchange & order book feeds for $clean..."
             )
-            val quoteResult = repository.getQuote(
-                clean,
-                _uiState.value.selectedTimeframe,
-                targetMarketType,
-                _uiState.value.selectedExchange,
-                explicitAssetType = if (isCrypto) AssetType.CRYPTO else AssetType.STOCK
-            )
-            val initialQuote = quoteResult.getOrNull()
+            val quoteResult = withTimeoutOrNull(30_000L) {
+                repository.getQuote(
+                    clean,
+                    _uiState.value.selectedTimeframe,
+                    targetMarketType,
+                    _uiState.value.selectedExchange,
+                    explicitAssetType = if (isCrypto) AssetType.CRYPTO else AssetType.STOCK
+                )
+            }
+            val initialQuote = quoteResult?.getOrNull()
 
             if (initialQuote == null) {
                 refreshDiagnostics()
@@ -1784,30 +1858,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
-            val perpAvailable = repository.hasFuturesPerpMarket(initialQuote.symbol, initialQuote.assetType)
-            val news = repository.getNews(clean)
+            val perpAvailable = withTimeoutOrNull(8_000L) { repository.hasFuturesPerpMarket(initialQuote.symbol, initialQuote.assetType) } ?: false
+            val news = withTimeoutOrNull(12_000L) { repository.getNews(clean) } ?: emptyList()
 
             // 2. NewsScannerAgent: Scrapes real financial headlines and passes into Gemini context & all models
             _uiState.value = _uiState.value.copy(
                 agentRunningPhase = "NewsScannerAgent: Scraping Bloomberg, Reuters & Google News for $clean..."
             )
-            val scannerResult = repository.newsScannerAgent.scanHeadlinesAndAnalyze(
-                query = clean,
-                assetType = initialQuote.assetType,
-                models = _uiState.value.aiModels,
-                dispatcher = repository.aiDispatcher,
-                broadcastAllModels = true
-            )
+            val scannerResult = withTimeoutOrNull(10_000L) {
+                repository.newsScannerAgent.scanHeadlinesAndAnalyze(
+                    query = clean,
+                    assetType = initialQuote.assetType,
+                    models = _uiState.value.aiModels,
+                    dispatcher = repository.aiDispatcher,
+                    broadcastAllModels = true
+                )
+            }
 
             // 3. Scan through all agent nodes simultaneously
             _uiState.value = _uiState.value.copy(
                 agentRunningPhase = "Executing multi-agent consensus, TradingView technical studies & SMC analysis..."
             )
+            // Engine result first (fast). AI notes are added in the background afterwards.
             val synthesis = repository.runAgentAnalysis(
                 quote = initialQuote,
                 news = news,
                 scannerResult = scannerResult,
-                aiEnrichmentEnabled = _uiState.value.aiEnrichmentEnabled,
+                aiEnrichmentEnabled = false,
                 balancingMode = _uiState.value.loadBalancingMode
             )
 
@@ -1912,6 +1989,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             runDayTraderPipeline(quote, setup, news, synthesis)
             refreshMasterVerdict(quote = quote, marketType = routedMarket, forceRefresh = true)
+            enrichWithAiInBackground(quote, news, scannerResult, currentTf)
 
             // Async best-timeframe triplet evaluation ("Best now" summary for context TFs & WAIT plans)
             viewModelScope.launch(Dispatchers.Default) {
@@ -3100,5 +3178,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         replayJob?.cancel()
         fundamentalsJob?.cancel()
         masterVerdictJob?.cancel()
+        viewModelScope.cancel()
     }
 }

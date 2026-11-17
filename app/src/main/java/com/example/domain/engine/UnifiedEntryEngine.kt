@@ -413,7 +413,7 @@ object UnifiedEntryEngine {
             Timeframe.ONE_YEAR -> minOf(dayRange * 25.00, safePrice * 0.60)
         }
         val atrFloor = (safePrice * 0.0001).coerceAtLeast(0.00000001)
-        val effectiveAtr = rawAtr.coerceIn(atrFloor, atrCeiling)
+        val effectiveAtr = rawAtr.coerceIn(minOf(atrFloor, atrCeiling), maxOf(atrFloor, atrCeiling))
 
         // Monotonic Risk Bounds across timeframes
         val minRiskFactor = when (tf) {
@@ -445,7 +445,7 @@ object UnifiedEntryEngine {
         val tfFloorMultiplier = 1.0 + (Timeframe.values().indexOf(tf).coerceAtLeast(0) * 0.15)
         val minRiskForTf = maxOf(dayRange * minRiskFactor, safePrice * (0.0035 * tfFloorMultiplier), effectiveAtr * 0.65)
         val maxRiskForTf = (dayRange * maxRiskFactor).coerceAtLeast(minRiskForTf * 1.05)
-        val risk = (effectiveAtr * 1.20).coerceIn(minRiskForTf, maxRiskForTf)
+        val risk = (effectiveAtr * 1.20).coerceIn(minOf(minRiskForTf, maxRiskForTf), maxOf(minRiskForTf, maxRiskForTf))
 
         // 2. Technical Indicators & Smart Money Concepts
         val indicators = QuantitativeEngine.computeIndicators(sortedCandles)
@@ -735,7 +735,7 @@ object UnifiedEntryEngine {
             }
 
             // E. Risk Quality (15%)
-            val potentialStopDist = (effectiveAtr * 1.20).coerceIn(minRiskForTf, maxRiskForTf)
+            val potentialStopDist = (effectiveAtr * 1.20).coerceIn(minOf(minRiskForTf, maxRiskForTf), maxOf(minRiskForTf, maxRiskForTf))
             val potentialRewardDist = potentialStopDist * 1.5
             val rrRatio = potentialRewardDist / potentialStopDist.coerceAtLeast(0.0000001)
             z.riskScore = (rrRatio / 2.0).coerceIn(0.4, 1.0) * scoringConfig.riskQualityWeight

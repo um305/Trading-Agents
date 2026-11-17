@@ -393,21 +393,6 @@ private fun TradingAgentsTopBar(uiState: com.example.ui.UiState, viewModel: Main
                     maxLines = 1
                 )
                 Spacer(modifier = Modifier.width(6.dp))
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(5.dp))
-                        .background(BullishGreen.copy(alpha = 0.15f))
-                        .padding(horizontal = 5.dp, vertical = 2.dp)
-                ) {
-                    Text(
-                        text = "TAURIC AI",
-                        fontSize = 8.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = BullishGreen,
-                        maxLines = 1
-                    )
-                }
-                Spacer(modifier = Modifier.width(6.dp))
                 // Section 4 Header chip: "Engine-only" or "Engine + AI (n companies)"
                 val chipText = if (uiState.isEngineOnly) {
                     "Engine-only"

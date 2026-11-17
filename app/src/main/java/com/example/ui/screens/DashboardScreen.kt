@@ -46,6 +46,7 @@ import com.example.ui.components.DayTraderAlertBanner
 import com.example.ui.components.ExchangeSourceSelector
 import com.example.ui.components.HorizonLadderTable
 import com.example.ui.components.MasterVerdictCard
+import com.example.ui.components.PlainTradeCard
 import com.example.ui.theme.AgentPurple
 import com.example.ui.theme.BullishGreen
 import com.example.ui.theme.DarkBackground
@@ -309,6 +310,16 @@ fun DashboardScreen(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
+                    // 4b. Plain-English "what to do now" card (beginner friendly)
+                    uiState.masterVerdict?.let { mv ->
+                        PlainTradeCard(
+                            verdict = mv,
+                            selectedHorizon = uiState.selectedHorizon,
+                            isEngineOnly = uiState.isEngineOnly
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                    }
+
                     // 5. Result Chart (Candlestick Graph with Entry, TP1, TP2, TP3, and SL overlays)
                     val chartHeight = if (isLandscape) 190 else 240
                     ChartContainer(
@@ -416,7 +427,7 @@ private fun ChartContainer(
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = "LIVE TAPE (Binance)",
+                        text = if (quote.assetType == com.example.domain.model.AssetType.CRYPTO) "LIVE TAPE (Binance)" else "STOCK FEED (Yahoo, can be delayed)",
                         color = BullishGreen,
                         fontSize = 9.sp,
                         fontWeight = FontWeight.Bold

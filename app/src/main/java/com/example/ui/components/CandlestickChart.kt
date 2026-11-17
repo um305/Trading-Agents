@@ -7,7 +7,11 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
@@ -36,6 +40,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -141,13 +146,15 @@ fun CandlestickChart(
 
     // Adjustable Chart Zoom & Pan states (Keyed to symbol and timeframe so live ticks don't jump/reset)
     val totalCandles = candles.size
+    // Always-current values for the touch handlers (handlers created once must never read stale numbers)
+    val totalCandlesNow by rememberUpdatedState(totalCandles)
     val baseVisibleCount = 28 // Generous width per candle so price action is bold and distinct on all timeframes
     var zoomLevel by remember(tradeSetupPlan?.pairSymbol, tradeSetupPlan?.timeframe) { mutableStateOf(1.0f) }
     var verticalPanPercent by remember(tradeSetupPlan?.pairSymbol, tradeSetupPlan?.timeframe) { mutableStateOf(0f) }
     var verticalScaleFactor by remember(tradeSetupPlan?.pairSymbol, tradeSetupPlan?.timeframe) { mutableStateOf(1.0f) }
 
     // Calculate visible candle count based on base count and zoom level
-    val visibleCandleCount = ((baseVisibleCount / zoomLevel).toInt()).coerceIn(4, totalCandles)
+    val visibleCandleCount = ((baseVisibleCount / zoomLevel).toInt()).coerceAtLeast(4).coerceAtMost(totalCandles)
     val maxPan = (totalCandles - visibleCandleCount).coerceAtLeast(0)
 
     // Pan offset initialized to -1f so it sticks to latest prices on right edge until user pans
@@ -162,6 +169,8 @@ fun CandlestickChart(
     } else {
         candles
     }
+
+    val visibleCountNow by rememberUpdatedState(visibleCandles.size)
 
     val candleMin = visibleCandles.minOfOrNull { it.low } ?: 100.0
     val candleMax = visibleCandles.maxOfOrNull { it.high } ?: (candleMin + 1.0)
@@ -497,8 +506,8 @@ fun CandlestickChart(
 
         if (tradeSetupPlan != null && showTargetsOverlay && tradeSetupPlan.isAvailable && tradeSetupPlan.recommendedEntry > 0.0 && tradeSetupPlan.stopLoss > 0.0 && tradeSetupPlan.verdictState != com.example.domain.model.SignalVerdictState.NO_TRADE) {
             val liveP = currentPrice
-            val zMin = minOf(tradeSetupPlan.entryZoneStart, tradeSetupPlan.entryZoneEnd)
-            val zMax = maxOf(tradeSetupPlan.entryZoneStart, tradeSetupPlan.entryZoneEnd)
+            val zMin = minOf(zStart ?: tradeSetupPlan.entryZoneStart, zEnd ?: tradeSetupPlan.entryZoneEnd)
+            val zMax = maxOf(zStart ?: tradeSetupPlan.entryZoneStart, zEnd ?: tradeSetupPlan.entryZoneEnd)
 
             val checkCandles = if (visibleCandles.size > 60) visibleCandles.takeLast(60) else visibleCandles
             val seriesLow = checkCandles.minOfOrNull { it.low } ?: liveP
@@ -549,7 +558,7 @@ fun CandlestickChart(
                         Spacer(modifier = Modifier.width(6.dp))
                         val wickNote = if (isLong && seriesLow <= tradeSetupPlan.stopLoss) " (Wick: $${format2(seriesLow)})" else if (!isLong && seriesHigh >= tradeSetupPlan.stopLoss) " (Wick: $${format2(seriesHigh)})" else ""
                         Text(
-                            text = "SL: $${format2(tradeSetupPlan.stopLoss)}$wickNote",
+                            text = "SL: $${format2(slVal ?: tradeSetupPlan.stopLoss)}$wickNote",
                             color = TextPrimary,
                             fontSize = 9.sp,
                             fontWeight = FontWeight.Bold,
@@ -759,7 +768,7 @@ fun CandlestickChart(
                     }
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Limit: $${format2(tradeSetupPlan.recommendedEntry)}",
+                        text = "Limit: $${format2(entryVal ?: tradeSetupPlan.recommendedEntry)}",
                         color = TechCyan,
                         fontSize = 9.sp,
                         fontWeight = FontWeight.ExtraBold,
@@ -782,13 +791,13 @@ fun CandlestickChart(
                 .pointerInput(Unit) {
                     detectTapGestures(
                         onTap = { offset ->
-                            if (visibleCandles.isNotEmpty()) {
-                                val rightMargin = 78.dp.toPx()
+                            if (visibleCountNow > 0) {
+                                val rightMargin = 82.dp.toPx()
                                 val plotW = (size.width - rightMargin).coerceAtLeast(100f)
                                 if (offset.x in 0f..plotW) {
-                                    val cWidth = plotW / visibleCandles.size
+                                    val cWidth = plotW / visibleCountNow
                                     if (cWidth > 0) {
-                                        val idx = (offset.x / cWidth).toInt().coerceIn(0, visibleCandles.size - 1)
+                                        val idx = (offset.x / cWidth).toInt().coerceIn(0, visibleCountNow - 1)
                                         selectedIndex = if (selectedIndex == idx) null else idx
                                     }
                                 }
@@ -797,41 +806,34 @@ fun CandlestickChart(
                     )
                 }
                 .pointerInput(Unit) {
-                    detectDragGestures { change, dragAmount ->
+                    // One finger dragging SIDEWAYS scrolls through the candles.
+                    // Up/down drags are left alone so the whole page can still scroll normally.
+                    detectHorizontalDragGestures { change, dragAmount ->
                         change.consume()
-                        val currentVisibleCount = ((baseVisibleCount / zoomLevel).toInt()).coerceIn(4, totalCandles)
-                        val rightMargin = 78.dp.toPx()
-                        val plotW = (size.width - rightMargin).coerceAtLeast(100f)
-                        val cWidth = plotW / currentVisibleCount
-                        if (cWidth > 0 && dragAmount.x != 0f) {
-                            val deltaX = -dragAmount.x / cWidth
-                            val maxP = (totalCandles - currentVisibleCount).coerceAtLeast(0).toFloat()
-                            panOffset = (effectivePan + deltaX).coerceIn(0f, maxP)
-                        }
-                        if (size.height > 0 && dragAmount.y != 0f) {
-                            val deltaY = (dragAmount.y / size.height) * 1.5f
-                            verticalPanPercent = (verticalPanPercent - deltaY).coerceIn(-1.5f, 1.5f)
+                        val count = ((baseVisibleCount / zoomLevel).toInt()).coerceAtLeast(4).coerceAtMost(totalCandlesNow)
+                        val plotW = (size.width - 82.dp.toPx()).coerceAtLeast(100f)
+                        val cWidth = plotW / count
+                        if (cWidth > 0f && dragAmount != 0f) {
+                            val maxP = (totalCandlesNow - count).coerceAtLeast(0).toFloat()
+                            val current = if (panOffset < 0f) maxP else panOffset.coerceIn(0f, maxP)
+                            panOffset = (current - dragAmount / cWidth).coerceIn(0f, maxP)
                         }
                     }
                 }
                 .pointerInput(Unit) {
-                    detectTransformGestures(panZoomLock = false) { _, pan, zoom, _ ->
-                        if (zoom != 1.0f) {
-                            zoomLevel = (zoomLevel * zoom).coerceIn(0.12f, 6.0f)
-                        }
-                        val currentVisibleCount = ((baseVisibleCount / zoomLevel).toInt()).coerceIn(4, totalCandles)
-                        val rightMargin = 78.dp.toPx()
-                        val plotW = (size.width - rightMargin).coerceAtLeast(100f)
-                        val cWidth = plotW / currentVisibleCount
-                        if (cWidth > 0 && pan.x != 0f) {
-                            val deltaX = -pan.x / cWidth
-                            val maxP = (totalCandles - currentVisibleCount).coerceAtLeast(0).toFloat()
-                            panOffset = (effectivePan + deltaX).coerceIn(0f, maxP)
-                        }
-                        if (size.height > 0 && pan.y != 0f) {
-                            val deltaY = (pan.y / size.height) * 1.5f
-                            verticalPanPercent = (verticalPanPercent - deltaY).coerceIn(-1.5f, 1.5f)
-                        }
+                    // Two fingers pinching = zoom. One-finger touches are never taken over here.
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        do {
+                            val event = awaitPointerEvent()
+                            if (event.changes.size >= 2) {
+                                val zoom = event.calculateZoom()
+                                if (zoom != 1f) {
+                                    zoomLevel = (zoomLevel * zoom).coerceIn(0.12f, 6.0f)
+                                    event.changes.forEach { it.consume() }
+                                }
+                            }
+                        } while (event.changes.any { it.pressed })
                     }
                 }
         ) {
@@ -1221,7 +1223,7 @@ fun CandlestickChart(
 
                 // 1. ENTRY/LIMIT
                 val inZoneRight = !isStoppedRight && !isInvalidatedRight && currentPrice in minOf(tradeSetupPlan.entryZoneStart, tradeSetupPlan.entryZoneEnd)..maxOf(tradeSetupPlan.entryZoneStart, tradeSetupPlan.entryZoneEnd) && (tradeSetupPlan.verdictState == com.example.domain.model.SignalVerdictState.TRADE)
-                val entryPrice = tradeSetupPlan.recommendedEntry
+                val entryPrice = entryVal ?: tradeSetupPlan.recommendedEntry
                 val inBoundsEntry = entryPrice in minPrice..maxPrice
                 val isAboveEntry = entryPrice > maxPrice
                 val isBelowEntry = entryPrice < minPrice
@@ -1354,8 +1356,8 @@ fun CandlestickChart(
                 }
 
                 // 5. SL
-                if (tradeSetupPlan.stopLoss > 0) {
-                    val slPrice = tradeSetupPlan.stopLoss
+                if ((slVal ?: tradeSetupPlan.stopLoss) > 0) {
+                    val slPrice = slVal ?: tradeSetupPlan.stopLoss
                     val inBounds = slPrice in minPrice..maxPrice
                     val isAbove = slPrice > maxPrice
                     val isBelow = slPrice < minPrice
@@ -1733,8 +1735,9 @@ object ChartBadgeLayoutHelper {
 
         val workingSpecs = specs.sortedBy { it.idealY }
 
-        val topPinned = workingSpecs.filter { it.isPinnedTop }
-        val bottomPinned = workingSpecs.filter { it.isPinnedBottom }
+        // Highest price always on top (TP3 above TP2 above TP1 ...), so the stack reads like a price ladder
+        val topPinned = workingSpecs.filter { it.isPinnedTop }.sortedByDescending { it.price }
+        val bottomPinned = workingSpecs.filter { it.isPinnedBottom }.sortedByDescending { it.price }
         val inBounds = workingSpecs.filter { !it.isPinnedTop && !it.isPinnedBottom }
 
         val topMargin = if (topPinned.isNotEmpty()) topPinned.size * step + minGapPx else 2f

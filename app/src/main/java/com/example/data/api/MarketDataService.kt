@@ -186,7 +186,16 @@ class MarketDataService {
                 val resultObj = results.getJSONObject(0)
                 val meta = resultObj.getJSONObject("meta")
                 val regularPrice = meta.optDouble("regularMarketPrice", 0.0)
-                val prevClose = meta.optDouble("chartPreviousClose", meta.optDouble("previousClose", regularPrice))
+                val rawPrevClose = meta.optDouble("chartPreviousClose", meta.optDouble("previousClose", regularPrice))
+                // chartPreviousClose can be the close from the START of a long chart range (months/years ago),
+                // which produced fake changes like +415%. A real 24h move is never that big, so ignore it.
+                val prevClose = if (regularPrice > 0.0 && rawPrevClose > 0.0 &&
+                    (rawPrevClose / regularPrice > 1.6 || rawPrevClose / regularPrice < 0.4)
+                ) {
+                    meta.optDouble("previousClose", regularPrice).takeIf { it > 0.0 && it / regularPrice in 0.4..1.6 } ?: regularPrice
+                } else {
+                    rawPrevClose
+                }
                 val metaDayHigh = meta.optDouble("regularMarketDayHigh", regularPrice * 1.01)
                 val metaDayLow = meta.optDouble("regularMarketDayLow", regularPrice * 0.99)
                 val regularVolume = meta.optDouble("regularMarketVolume", 1500000.0)

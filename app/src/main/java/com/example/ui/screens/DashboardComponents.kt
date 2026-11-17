@@ -2454,7 +2454,7 @@ fun ExecutiveDecisionResultCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            val smcData = remember(quote.candles) {
+            val smcData = remember(quote.symbol, quote.timeframe, quote.candles.size, quote.candles.lastOrNull()?.timestamp) {
                 com.example.domain.analytics.QuantitativeEngine.computeSmartMoneyStructure(quote.candles)
             }
             val swingIsBearish = smcData.smcSwingStructure.contains("Bearish", ignoreCase = true)

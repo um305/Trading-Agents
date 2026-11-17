@@ -576,17 +576,32 @@ object MasterVerdictEngine {
             isLongDemand = isLong,
             atr = setupAtr
         )
-        val limitPrice = setup.entryPrice.coerceIn(zoneMin, zoneMax)
+        val limitPrice = setup.entryPrice.coerceIn(minOf(zoneMin, zoneMax), maxOf(zoneMin, zoneMax))
         val minStopGap = maxOf(setupAtr * 0.20, safeLivePrice * 0.0015)
-        val stopLoss = if (isLong) {
+        val rawStopLoss = if (isLong) {
             minOf(setup.stopLossPrice, zoneMin - minStopGap).coerceAtLeast(safeLivePrice * 0.05)
         } else {
             maxOf(setup.stopLossPrice, zoneMax + minStopGap)
         }
+        // SANITY CAP: a stop can never be absurdly far from the entry (bad or old data produced 35% stops
+        // on 15-minute scalps). If it is too far, the stop is pulled in and the targets are rebuilt from it.
+        val maxStopFraction = when (horizon) {
+            TradingHorizon.SCALP -> 0.015
+            TradingHorizon.INTRADAY -> 0.03
+            TradingHorizon.SWING -> 0.08
+            else -> 0.15
+        }
+        val maxStopDistance = safeLivePrice * maxStopFraction
+        val stopWasTooFar = abs(limitPrice - rawStopLoss) > maxStopDistance
+        val stopLoss = when {
+            !stopWasTooFar -> rawStopLoss
+            isLong -> limitPrice - maxStopDistance
+            else -> limitPrice + maxStopDistance
+        }
         val stopDist = abs(limitPrice - stopLoss).coerceAtLeast(safeLivePrice * 0.0005)
-        val tp1 = setup.takeProfit1
-        val tp2 = setup.takeProfit2
-        val tp3 = setup.takeProfit3
+        val tp1 = if (stopWasTooFar) (if (isLong) limitPrice + stopDist * 1.5 else limitPrice - stopDist * 1.5) else setup.takeProfit1
+        val tp2 = if (stopWasTooFar) (if (isLong) limitPrice + stopDist * 2.5 else limitPrice - stopDist * 2.5) else setup.takeProfit2
+        val tp3 = if (stopWasTooFar) (if (isLong) limitPrice + stopDist * 4.0 else limitPrice - stopDist * 4.0) else setup.takeProfit3
         val tp1Rr = abs(tp1 - limitPrice) / stopDist
         val tp2Rr = abs(tp2 - limitPrice) / stopDist
         val tp3Rr = abs(tp3 - limitPrice) / stopDist

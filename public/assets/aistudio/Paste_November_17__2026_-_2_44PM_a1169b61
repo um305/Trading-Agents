@@ -1,0 +1,1372 @@
+TASK: Apply the exact code changes below to my existing Android app (Kotlin + Jetpack Compose) "TradingAgents".
+
+RULES
+1. Make ONLY these changes. Do not redesign, rename, remove or "improve" anything else. Keep every existing feature.
+2. For each FIND block: locate that exact code in the named file and replace it with the matching REPLACE WITH block. (FIND blocks include a few unchanged lines around the change so you can locate them; keep those lines.)
+3. For the NEW FILE: create it exactly as given.
+4. Work through the STEPS in order. If you cannot finish all steps in one reply, finish as many as you can, tell me which STEP you stopped at, and I will reply "continue".
+5. After all steps, rebuild. If the build shows a compile error, fix it in the smallest possible way WITHOUT undoing the purpose of the change (the purpose is written above each step).
+6. Do not add paid services, new libraries or new permissions. Do not touch the API-key / AI-model setup.
+7. When finished, reply with a short list of which steps were applied.
+
+Source folder for all paths: app/src/main/java/com/example/
+==================================================================
+
+
+##################################################
+STEP 1: FILE app/src/main/java/com/example/ui/MainViewModel.kt
+PURPOSE: STOP FREEZES & CRASHES (most important). Run all background work off the UI thread, catch unexpected errors instead of crashing the app, put time limits on slow network/AI calls, show the engine result first and add AI notes later in the background, refresh the live price a bit less often, stagger start-up work, and start on the 1h timeframe.
+##################################################
+
+--- CHANGE 1 ---
+FIND:
+```
+import com.example.domain.model.VerdictState
+import com.example.domain.util.PriceFormatter
+import kotlinx.coroutines.Dispatchers
+import java.util.Locale
+import kotlin.random.Random
+```
+REPLACE WITH:
+```
+import com.example.domain.model.VerdictState
+import com.example.domain.util.PriceFormatter
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.Locale
+import kotlin.random.Random
+```
+
+--- CHANGE 2 ---
+FIND:
+```
+    val currentScreen: AppScreen = AppScreen.TERMINAL,
+    val selectedSymbol: String = "NVDA",
+    val selectedTimeframe: Timeframe = Timeframe.ONE_MONTH,
+    val selectedMarketType: TradingMarketType = TradingMarketType.SPOT,
+    val selectedExchange: CryptoExchange = CryptoExchange.BINANCE,
+```
+REPLACE WITH:
+```
+    val currentScreen: AppScreen = AppScreen.TERMINAL,
+    val selectedSymbol: String = "NVDA",
+    val selectedTimeframe: Timeframe = Timeframe.ONE_HOUR,
+    val selectedMarketType: TradingMarketType = TradingMarketType.SPOT,
+    val selectedExchange: CryptoExchange = CryptoExchange.BINANCE,
+```
+
+--- CHANGE 3 ---
+FIND:
+```
+class MainViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val repository = MarketRepository(application)
+    private val prefs = application.getSharedPreferences("trading_agents_prefs", Context.MODE_PRIVATE)
+```
+REPLACE WITH:
+```
+class MainViewModel(application: Application) : AndroidViewModel(application) {
+
+    // STABILITY FIX: one safe scope for ALL work started by this ViewModel.
+    //  - runs OFF the UI thread, so the screen can never freeze while data loads
+    //  - runs one task at a time, so shared state is never touched by two threads at once
+    //  - any unexpected error is caught here (loading spinners are cleared) instead of crashing the app
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val viewModelScope: CoroutineScope = CoroutineScope(
+        SupervisorJob() +
+            Dispatchers.Default.limitedParallelism(1) +
+            CoroutineExceptionHandler { _, throwable ->
+                android.util.Log.e("MainViewModel", "Background task failed - app kept alive", throwable)
+                _uiState.update {
+                    it.copy(
+                        isLoadingQuote = false,
+                        isRunningAgents = false,
+                        agentRunningPhase = "",
+                        feedbackMessage = "Something went wrong (" + (throwable.message ?: throwable.javaClass.simpleName) + "). Tap refresh to retry."
+                    )
+                }
+            }
+    )
+
+    private val repository = MarketRepository(application)
+    private val prefs = application.getSharedPreferences("trading_agents_prefs", Context.MODE_PRIVATE)
+```
+
+--- CHANGE 4 ---
+FIND:
+```
+    private var masterVerdictJob: Job? = null
+    private var lastAlertedSymbolStatus: String = ""
+    private val _tradePlansCache = mutableMapOf<String, TradeSetupPlan>()
+    private fun getPlanCacheKey(symbol: String, marketType: TradingMarketType, timeframe: Timeframe) =
+        "${symbol.uppercase()}_${marketType.name}_${timeframe.name}"
+```
+REPLACE WITH:
+```
+    private var masterVerdictJob: Job? = null
+    private var lastAlertedSymbolStatus: String = ""
+    private val _tradePlansCache = java.util.concurrent.ConcurrentHashMap<String, TradeSetupPlan>()
+    private fun getPlanCacheKey(symbol: String, marketType: TradingMarketType, timeframe: Timeframe) =
+        "${symbol.uppercase()}_${marketType.name}_${timeframe.name}"
+```
+
+--- CHANGE 5 ---
+FIND:
+```
+        applyBackgroundMonitorSchedule(BackgroundPreferences.getMode(getApplication()))
+
+        // Initial load
+        executeUnifiedQuery("NVDA")
+        scanCrypto(TradingMarketType.FUTURES)
+        runDayTraderScan("ALL")
+        startLiveTicker()
+    }
+
+```
+REPLACE WITH:
+```
+        applyBackgroundMonitorSchedule(BackgroundPreferences.getMode(getApplication()))
+
+        // Initial load - staggered so the phone is never asked to do everything at the same moment
+        executeUnifiedQuery("NVDA")
+        startLiveTicker()
+        viewModelScope.launch {
+            delay(8_000L)
+            scanCrypto(TradingMarketType.FUTURES)
+            delay(8_000L)
+            runDayTraderScan("ALL")
+        }
+    }
+
+```
+
+--- CHANGE 6 ---
+FIND:
+```
+            var prevPrice = _uiState.value.currentQuote?.currentPrice ?: 0.0
+            while (isActive) {
+                delay(2500)
+                if (!_uiState.value.isLiveTickingActive) continue
+                val current = _uiState.value.currentQuote ?: continue
+```
+REPLACE WITH:
+```
+            var prevPrice = _uiState.value.currentQuote?.currentPrice ?: 0.0
+            while (isActive) {
+                delay(4000)
+                try {
+                if (!_uiState.value.isLiveTickingActive) continue
+                val current = _uiState.value.currentQuote ?: continue
+```
+
+--- CHANGE 7 ---
+FIND:
+```
+                    liveTickCounter = _uiState.value.liveTickCounter + 1
+                )
+            }
+        }
+```
+REPLACE WITH:
+```
+                    liveTickCounter = _uiState.value.liveTickCounter + 1
+                )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    android.util.Log.w("MainViewModel", "Live tick skipped: " + e.message)
+                }
+            }
+        }
+```
+
+--- CHANGE 8 ---
+FIND:
+```
+            )
+
+            val quoteResult = repository.getQuote(symbol, timeframe, marketType, exchange, explicitAssetType)
+            val initialQuote = quoteResult.getOrNull()
+
+            // Guard against out-of-order async responses
+```
+REPLACE WITH:
+```
+            )
+
+            val quoteResult = withTimeoutOrNull(30_000L) {
+                repository.getQuote(symbol, timeframe, marketType, exchange, explicitAssetType)
+            }
+            val initialQuote = quoteResult?.getOrNull()
+
+            // Guard against out-of-order async responses
+```
+
+--- CHANGE 9 ---
+FIND:
+```
+
+            if (initialQuote != null) {
+                val perpAvailable = repository.hasFuturesPerpMarket(initialQuote.symbol, initialQuote.assetType)
+                val resolvedAssetTypeForNews = initialQuote.assetType
+                val news = repository.getNews(symbol, resolvedAssetTypeForNews)
+                val scannerResult = repository.scanNewsWithGemini(symbol, initialQuote.assetType, broadcastAllModels = false)
+                val synthesis = repository.runAgentAnalysis(
+                    quote = initialQuote,
+                    news = news,
+                    scannerResult = scannerResult,
+                    aiEnrichmentEnabled = _uiState.value.aiEnrichmentEnabled,
+                    balancingMode = _uiState.value.loadBalancingMode
+                )
+```
+REPLACE WITH:
+```
+
+            if (initialQuote != null) {
+                val perpAvailable = withTimeoutOrNull(8_000L) { repository.hasFuturesPerpMarket(initialQuote.symbol, initialQuote.assetType) } ?: false
+                val resolvedAssetTypeForNews = initialQuote.assetType
+                val news = withTimeoutOrNull(12_000L) { repository.getNews(symbol, resolvedAssetTypeForNews) } ?: emptyList()
+                val scannerResult = withTimeoutOrNull(10_000L) { repository.scanNewsWithGemini(symbol, initialQuote.assetType, broadcastAllModels = false) }
+                // Engine result first (fast). AI notes are added in the background afterwards.
+                val synthesis = repository.runAgentAnalysis(
+                    quote = initialQuote,
+                    news = news,
+                    scannerResult = scannerResult,
+                    aiEnrichmentEnabled = false,
+                    balancingMode = _uiState.value.loadBalancingMode
+                )
+```
+
+--- CHANGE 10 ---
+FIND:
+```
+                runDayTraderPipeline(quote, setup, news, synthesis)
+                refreshMasterVerdict(quote = quote, marketType = routedMarket)
+
+                // Async best-timeframe triplet evaluation across 5m / 15m / 1h / 4h / 1D
+```
+REPLACE WITH:
+```
+                runDayTraderPipeline(quote, setup, news, synthesis)
+                refreshMasterVerdict(quote = quote, marketType = routedMarket)
+                enrichWithAiInBackground(quote, news, scannerResult, currentTf)
+
+                // Async best-timeframe triplet evaluation across 5m / 15m / 1h / 4h / 1D
+```
+
+--- CHANGE 11 ---
+FIND:
+```
+                    feedbackMessage = "Failed to load data for $symbol"
+                )
+            }
+        }
+```
+REPLACE WITH:
+```
+                    feedbackMessage = "Failed to load data for $symbol"
+                )
+            }
+        }
+    }
+
+    /**
+     * AI is optional and slow, so it never blocks the screen: the engine result is shown first,
+     * then the AI committee notes are added later (60 s maximum, otherwise they are simply skipped).
+     */
+    private fun enrichWithAiInBackground(
+        quote: MarketQuote,
+        news: List<NewsItem>,
+        scannerResult: NewsScannerResult?,
+        timeframe: Timeframe
+    ) {
+        if (!_uiState.value.aiEnrichmentEnabled || _uiState.value.connectedCompaniesCount == 0) return
+        viewModelScope.launch {
+            val enriched = withTimeoutOrNull(60_000L) {
+                repository.runAgentAnalysis(
+                    quote = quote,
+                    news = news,
+                    scannerResult = scannerResult,
+                    aiEnrichmentEnabled = true,
+                    balancingMode = _uiState.value.loadBalancingMode
+                )
+            } ?: return@launch
+            val state = _uiState.value
+            if (state.selectedSymbol.equals(quote.symbol, ignoreCase = true) && state.selectedTimeframe == timeframe) {
+                _uiState.update { it.copy(agentSynthesis = enriched) }
+                if (enriched.aiShiftPoints != 0) recalculateCurrentSetup()
+            }
+        }
+```
+
+--- CHANGE 12 ---
+FIND:
+```
+                agentRunningPhase = "Connecting to market exchange & order book feeds for $clean..."
+            )
+            val quoteResult = repository.getQuote(
+                clean,
+                _uiState.value.selectedTimeframe,
+                targetMarketType,
+                _uiState.value.selectedExchange,
+                explicitAssetType = if (isCrypto) AssetType.CRYPTO else AssetType.STOCK
+            )
+            val initialQuote = quoteResult.getOrNull()
+
+            if (initialQuote == null) {
+```
+REPLACE WITH:
+```
+                agentRunningPhase = "Connecting to market exchange & order book feeds for $clean..."
+            )
+            val quoteResult = withTimeoutOrNull(30_000L) {
+                repository.getQuote(
+                    clean,
+                    _uiState.value.selectedTimeframe,
+                    targetMarketType,
+                    _uiState.value.selectedExchange,
+                    explicitAssetType = if (isCrypto) AssetType.CRYPTO else AssetType.STOCK
+                )
+            }
+            val initialQuote = quoteResult?.getOrNull()
+
+            if (initialQuote == null) {
+```
+
+--- CHANGE 13 ---
+FIND:
+```
+            }
+
+            val perpAvailable = repository.hasFuturesPerpMarket(initialQuote.symbol, initialQuote.assetType)
+            val news = repository.getNews(clean)
+
+            // 2. NewsScannerAgent: Scrapes real financial headlines and passes into Gemini context & all models
+```
+REPLACE WITH:
+```
+            }
+
+            val perpAvailable = withTimeoutOrNull(8_000L) { repository.hasFuturesPerpMarket(initialQuote.symbol, initialQuote.assetType) } ?: false
+            val news = withTimeoutOrNull(12_000L) { repository.getNews(clean) } ?: emptyList()
+
+            // 2. NewsScannerAgent: Scrapes real financial headlines and passes into Gemini context & all models
+```
+
+--- CHANGE 14 ---
+FIND:
+```
+                agentRunningPhase = "NewsScannerAgent: Scraping Bloomberg, Reuters & Google News for $clean..."
+            )
+            val scannerResult = repository.newsScannerAgent.scanHeadlinesAndAnalyze(
+                query = clean,
+                assetType = initialQuote.assetType,
+                models = _uiState.value.aiModels,
+                dispatcher = repository.aiDispatcher,
+                broadcastAllModels = true
+            )
+
+            // 3. Scan through all agent nodes simultaneously
+```
+REPLACE WITH:
+```
+                agentRunningPhase = "NewsScannerAgent: Scraping Bloomberg, Reuters & Google News for $clean..."
+            )
+            val scannerResult = withTimeoutOrNull(10_000L) {
+                repository.newsScannerAgent.scanHeadlinesAndAnalyze(
+                    query = clean,
+                    assetType = initialQuote.assetType,
+                    models = _uiState.value.aiModels,
+                    dispatcher = repository.aiDispatcher,
+                    broadcastAllModels = true
+                )
+            }
+
+            // 3. Scan through all agent nodes simultaneously
+```
+
+--- CHANGE 15 ---
+FIND:
+```
+                agentRunningPhase = "Executing multi-agent consensus, TradingView technical studies & SMC analysis..."
+            )
+            val synthesis = repository.runAgentAnalysis(
+                quote = initialQuote,
+                news = news,
+                scannerResult = scannerResult,
+                aiEnrichmentEnabled = _uiState.value.aiEnrichmentEnabled,
+                balancingMode = _uiState.value.loadBalancingMode
+            )
+```
+REPLACE WITH:
+```
+                agentRunningPhase = "Executing multi-agent consensus, TradingView technical studies & SMC analysis..."
+            )
+            // Engine result first (fast). AI notes are added in the background afterwards.
+            val synthesis = repository.runAgentAnalysis(
+                quote = initialQuote,
+                news = news,
+                scannerResult = scannerResult,
+                aiEnrichmentEnabled = false,
+                balancingMode = _uiState.value.loadBalancingMode
+            )
+```
+
+--- CHANGE 16 ---
+FIND:
+```
+            runDayTraderPipeline(quote, setup, news, synthesis)
+            refreshMasterVerdict(quote = quote, marketType = routedMarket, forceRefresh = true)
+
+            // Async best-timeframe triplet evaluation ("Best now" summary for context TFs & WAIT plans)
+```
+REPLACE WITH:
+```
+            runDayTraderPipeline(quote, setup, news, synthesis)
+            refreshMasterVerdict(quote = quote, marketType = routedMarket, forceRefresh = true)
+            enrichWithAiInBackground(quote, news, scannerResult, currentTf)
+
+            // Async best-timeframe triplet evaluation ("Best now" summary for context TFs & WAIT plans)
+```
+
+--- CHANGE 17 ---
+FIND:
+```
+        fundamentalsJob?.cancel()
+        masterVerdictJob?.cancel()
+    }
+}
+```
+REPLACE WITH:
+```
+        fundamentalsJob?.cancel()
+        masterVerdictJob?.cancel()
+        viewModelScope.cancel()
+    }
+}
+```
+
+
+##################################################
+STEP 2: FILE app/src/main/java/com/example/domain/engine/UnifiedEntryEngine.kt
+PURPOSE: CRASH GUARD: coerceIn(min, max) throws an exception when min is bigger than max; made it safe.
+##################################################
+
+--- CHANGE 18 ---
+FIND:
+```
+        }
+        val atrFloor = (safePrice * 0.0001).coerceAtLeast(0.00000001)
+        val effectiveAtr = rawAtr.coerceIn(atrFloor, atrCeiling)
+
+        // Monotonic Risk Bounds across timeframes
+```
+REPLACE WITH:
+```
+        }
+        val atrFloor = (safePrice * 0.0001).coerceAtLeast(0.00000001)
+        val effectiveAtr = rawAtr.coerceIn(minOf(atrFloor, atrCeiling), maxOf(atrFloor, atrCeiling))
+
+        // Monotonic Risk Bounds across timeframes
+```
+
+--- CHANGE 19 ---
+FIND:
+```
+        val minRiskForTf = maxOf(dayRange * minRiskFactor, safePrice * (0.0035 * tfFloorMultiplier), effectiveAtr * 0.65)
+        val maxRiskForTf = (dayRange * maxRiskFactor).coerceAtLeast(minRiskForTf * 1.05)
+        val risk = (effectiveAtr * 1.20).coerceIn(minRiskForTf, maxRiskForTf)
+
+        // 2. Technical Indicators & Smart Money Concepts
+```
+REPLACE WITH:
+```
+        val minRiskForTf = maxOf(dayRange * minRiskFactor, safePrice * (0.0035 * tfFloorMultiplier), effectiveAtr * 0.65)
+        val maxRiskForTf = (dayRange * maxRiskFactor).coerceAtLeast(minRiskForTf * 1.05)
+        val risk = (effectiveAtr * 1.20).coerceIn(minOf(minRiskForTf, maxRiskForTf), maxOf(minRiskForTf, maxRiskForTf))
+
+        // 2. Technical Indicators & Smart Money Concepts
+```
+
+--- CHANGE 20 ---
+FIND:
+```
+
+            // E. Risk Quality (15%)
+            val potentialStopDist = (effectiveAtr * 1.20).coerceIn(minRiskForTf, maxRiskForTf)
+            val potentialRewardDist = potentialStopDist * 1.5
+            val rrRatio = potentialRewardDist / potentialStopDist.coerceAtLeast(0.0000001)
+```
+REPLACE WITH:
+```
+
+            // E. Risk Quality (15%)
+            val potentialStopDist = (effectiveAtr * 1.20).coerceIn(minOf(minRiskForTf, maxRiskForTf), maxOf(minRiskForTf, maxRiskForTf))
+            val potentialRewardDist = potentialStopDist * 1.5
+            val rrRatio = potentialRewardDist / potentialStopDist.coerceAtLeast(0.0000001)
+```
+
+
+##################################################
+STEP 3: FILE app/src/main/java/com/example/domain/daytrader/replay/ReplayEngine.kt
+PURPOSE: CRASH GUARD for empty sessions, plus an honest label: when price hits neither target nor stop in more than 75% of simulations, show "Inconclusive" instead of the misleading "Strongly toward the stop".
+##################################################
+
+--- CHANGE 21 ---
+FIND:
+```
+
+        pool.sessions.forEach { session ->
+            val startIdx = plan.timeOfDayIndex.coerceIn(0, session.bars.lastIndex)
+            val sessionBars = session.bars.drop(startIdx).take(plan.horizonBars)
+            if (sessionBars.isNotEmpty()) {
+```
+REPLACE WITH:
+```
+
+        pool.sessions.forEach { session ->
+            val startIdx = plan.timeOfDayIndex.coerceIn(0, maxOf(0, session.bars.lastIndex))
+            val sessionBars = session.bars.drop(startIdx).take(plan.horizonBars)
+            if (sessionBars.isNotEmpty()) {
+```
+
+--- CHANGE 22 ---
+FIND:
+```
+        numReplays: Int = DEFAULT_NUM_REPLAYS
+    ): ReplayVerdict {
+        if (resolvedCount < 200) {
+            val headline = "Not enough resolved replays ($resolvedCount/200 across $sessionsCount sessions)"
+            val details = mutableListOf(
+                "Only $resolvedCount/$numReplays simulated paths touched target or stop within the horizon (minimum 200 resolved paths required for a directional lean).",
+```
+REPLACE WITH:
+```
+        numReplays: Int = DEFAULT_NUM_REPLAYS
+    ): ReplayVerdict {
+        // If price reached neither target nor stop in most simulations, the replay cannot judge the plan.
+        // (Before, 3% "stop first" + 97% "neither" was shown as "Strongly toward the stop", which is misleading.)
+        val mostlyOpen = neitherPct > 75.0
+        if (resolvedCount < 200 || mostlyOpen) {
+            val headline = if (mostlyOpen && resolvedCount >= 200) {
+                "Inconclusive: in ${String.format(Locale.US, "%.0f", neitherPct)}% of simulations price hit neither target nor stop in this time window"
+            } else {
+                "Not enough resolved replays ($resolvedCount/200 across $sessionsCount sessions)"
+            }
+            val details = mutableListOf(
+                "Only $resolvedCount/$numReplays simulated paths touched target or stop within the horizon (minimum 200 resolved paths required for a directional lean).",
+```
+
+
+##################################################
+STEP 4: FILE app/src/main/java/com/example/ui/components/CandlestickChart.kt
+PURPOSE: FIX THE CHART: (a) crash when a symbol has fewer than 4 candles; (b) one-finger SIDEWAYS drag pans the candles, up/down drag scrolls the page, two-finger pinch zooms (the old touch code hijacked page scrolling and used stale numbers); (c) TP labels above/below the visible price range now stack in price order (TP3 above TP2 above TP1); (d) Entry/SL badges and header text now show the same numbers as the lines on the chart.
+##################################################
+
+--- CHANGE 23 ---
+FIND:
+```
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+```
+REPLACE WITH:
+```
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+```
+
+--- CHANGE 24 ---
+FIND:
+```
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+```
+REPLACE WITH:
+```
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+```
+
+--- CHANGE 25 ---
+FIND:
+```
+    // Adjustable Chart Zoom & Pan states (Keyed to symbol and timeframe so live ticks don't jump/reset)
+    val totalCandles = candles.size
+    val baseVisibleCount = 28 // Generous width per candle so price action is bold and distinct on all timeframes
+    var zoomLevel by remember(tradeSetupPlan?.pairSymbol, tradeSetupPlan?.timeframe) { mutableStateOf(1.0f) }
+```
+REPLACE WITH:
+```
+    // Adjustable Chart Zoom & Pan states (Keyed to symbol and timeframe so live ticks don't jump/reset)
+    val totalCandles = candles.size
+    // Always-current values for the touch handlers (handlers created once must never read stale numbers)
+    val totalCandlesNow by rememberUpdatedState(totalCandles)
+    val baseVisibleCount = 28 // Generous width per candle so price action is bold and distinct on all timeframes
+    var zoomLevel by remember(tradeSetupPlan?.pairSymbol, tradeSetupPlan?.timeframe) { mutableStateOf(1.0f) }
+```
+
+--- CHANGE 26 ---
+FIND:
+```
+
+    // Calculate visible candle count based on base count and zoom level
+    val visibleCandleCount = ((baseVisibleCount / zoomLevel).toInt()).coerceIn(4, totalCandles)
+    val maxPan = (totalCandles - visibleCandleCount).coerceAtLeast(0)
+
+```
+REPLACE WITH:
+```
+
+    // Calculate visible candle count based on base count and zoom level
+    val visibleCandleCount = ((baseVisibleCount / zoomLevel).toInt()).coerceAtLeast(4).coerceAtMost(totalCandles)
+    val maxPan = (totalCandles - visibleCandleCount).coerceAtLeast(0)
+
+```
+
+--- CHANGE 27 ---
+FIND:
+```
+        candles
+    }
+
+    val candleMin = visibleCandles.minOfOrNull { it.low } ?: 100.0
+```
+REPLACE WITH:
+```
+        candles
+    }
+
+    val visibleCountNow by rememberUpdatedState(visibleCandles.size)
+
+    val candleMin = visibleCandles.minOfOrNull { it.low } ?: 100.0
+```
+
+--- CHANGE 28 ---
+FIND:
+```
+        if (tradeSetupPlan != null && showTargetsOverlay && tradeSetupPlan.isAvailable && tradeSetupPlan.recommendedEntry > 0.0 && tradeSetupPlan.stopLoss > 0.0 && tradeSetupPlan.verdictState != com.example.domain.model.SignalVerdictState.NO_TRADE) {
+            val liveP = currentPrice
+            val zMin = minOf(tradeSetupPlan.entryZoneStart, tradeSetupPlan.entryZoneEnd)
+            val zMax = maxOf(tradeSetupPlan.entryZoneStart, tradeSetupPlan.entryZoneEnd)
+
+            val checkCandles = if (visibleCandles.size > 60) visibleCandles.takeLast(60) else visibleCandles
+```
+REPLACE WITH:
+```
+        if (tradeSetupPlan != null && showTargetsOverlay && tradeSetupPlan.isAvailable && tradeSetupPlan.recommendedEntry > 0.0 && tradeSetupPlan.stopLoss > 0.0 && tradeSetupPlan.verdictState != com.example.domain.model.SignalVerdictState.NO_TRADE) {
+            val liveP = currentPrice
+            val zMin = minOf(zStart ?: tradeSetupPlan.entryZoneStart, zEnd ?: tradeSetupPlan.entryZoneEnd)
+            val zMax = maxOf(zStart ?: tradeSetupPlan.entryZoneStart, zEnd ?: tradeSetupPlan.entryZoneEnd)
+
+            val checkCandles = if (visibleCandles.size > 60) visibleCandles.takeLast(60) else visibleCandles
+```
+
+--- CHANGE 29 ---
+FIND:
+```
+                        val wickNote = if (isLong && seriesLow <= tradeSetupPlan.stopLoss) " (Wick: $${format2(seriesLow)})" else if (!isLong && seriesHigh >= tradeSetupPlan.stopLoss) " (Wick: $${format2(seriesHigh)})" else ""
+                        Text(
+                            text = "SL: $${format2(tradeSetupPlan.stopLoss)}$wickNote",
+                            color = TextPrimary,
+                            fontSize = 9.sp,
+```
+REPLACE WITH:
+```
+                        val wickNote = if (isLong && seriesLow <= tradeSetupPlan.stopLoss) " (Wick: $${format2(seriesLow)})" else if (!isLong && seriesHigh >= tradeSetupPlan.stopLoss) " (Wick: $${format2(seriesHigh)})" else ""
+                        Text(
+                            text = "SL: $${format2(slVal ?: tradeSetupPlan.stopLoss)}$wickNote",
+                            color = TextPrimary,
+                            fontSize = 9.sp,
+```
+
+--- CHANGE 30 ---
+FIND:
+```
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Limit: $${format2(tradeSetupPlan.recommendedEntry)}",
+                        color = TechCyan,
+                        fontSize = 9.sp,
+```
+REPLACE WITH:
+```
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Limit: $${format2(entryVal ?: tradeSetupPlan.recommendedEntry)}",
+                        color = TechCyan,
+                        fontSize = 9.sp,
+```
+
+--- CHANGE 31 ---
+FIND:
+```
+                    detectTapGestures(
+                        onTap = { offset ->
+                            if (visibleCandles.isNotEmpty()) {
+                                val rightMargin = 78.dp.toPx()
+                                val plotW = (size.width - rightMargin).coerceAtLeast(100f)
+                                if (offset.x in 0f..plotW) {
+                                    val cWidth = plotW / visibleCandles.size
+                                    if (cWidth > 0) {
+                                        val idx = (offset.x / cWidth).toInt().coerceIn(0, visibleCandles.size - 1)
+                                        selectedIndex = if (selectedIndex == idx) null else idx
+                                    }
+```
+REPLACE WITH:
+```
+                    detectTapGestures(
+                        onTap = { offset ->
+                            if (visibleCountNow > 0) {
+                                val rightMargin = 82.dp.toPx()
+                                val plotW = (size.width - rightMargin).coerceAtLeast(100f)
+                                if (offset.x in 0f..plotW) {
+                                    val cWidth = plotW / visibleCountNow
+                                    if (cWidth > 0) {
+                                        val idx = (offset.x / cWidth).toInt().coerceIn(0, visibleCountNow - 1)
+                                        selectedIndex = if (selectedIndex == idx) null else idx
+                                    }
+```
+
+--- CHANGE 32 ---
+FIND:
+```
+                }
+                .pointerInput(Unit) {
+                    detectDragGestures { change, dragAmount ->
+                        change.consume()
+                        val currentVisibleCount = ((baseVisibleCount / zoomLevel).toInt()).coerceIn(4, totalCandles)
+                        val rightMargin = 78.dp.toPx()
+                        val plotW = (size.width - rightMargin).coerceAtLeast(100f)
+                        val cWidth = plotW / currentVisibleCount
+                        if (cWidth > 0 && dragAmount.x != 0f) {
+                            val deltaX = -dragAmount.x / cWidth
+                            val maxP = (totalCandles - currentVisibleCount).coerceAtLeast(0).toFloat()
+                            panOffset = (effectivePan + deltaX).coerceIn(0f, maxP)
+                        }
+                        if (size.height > 0 && dragAmount.y != 0f) {
+                            val deltaY = (dragAmount.y / size.height) * 1.5f
+                            verticalPanPercent = (verticalPanPercent - deltaY).coerceIn(-1.5f, 1.5f)
+                        }
+                    }
+                }
+                .pointerInput(Unit) {
+                    detectTransformGestures(panZoomLock = false) { _, pan, zoom, _ ->
+                        if (zoom != 1.0f) {
+                            zoomLevel = (zoomLevel * zoom).coerceIn(0.12f, 6.0f)
+                        }
+                        val currentVisibleCount = ((baseVisibleCount / zoomLevel).toInt()).coerceIn(4, totalCandles)
+                        val rightMargin = 78.dp.toPx()
+                        val plotW = (size.width - rightMargin).coerceAtLeast(100f)
+                        val cWidth = plotW / currentVisibleCount
+                        if (cWidth > 0 && pan.x != 0f) {
+                            val deltaX = -pan.x / cWidth
+                            val maxP = (totalCandles - currentVisibleCount).coerceAtLeast(0).toFloat()
+                            panOffset = (effectivePan + deltaX).coerceIn(0f, maxP)
+                        }
+                        if (size.height > 0 && pan.y != 0f) {
+                            val deltaY = (pan.y / size.height) * 1.5f
+                            verticalPanPercent = (verticalPanPercent - deltaY).coerceIn(-1.5f, 1.5f)
+                        }
+                    }
+                }
+```
+REPLACE WITH:
+```
+                }
+                .pointerInput(Unit) {
+                    // One finger dragging SIDEWAYS scrolls through the candles.
+                    // Up/down drags are left alone so the whole page can still scroll normally.
+                    detectHorizontalDragGestures { change, dragAmount ->
+                        change.consume()
+                        val count = ((baseVisibleCount / zoomLevel).toInt()).coerceAtLeast(4).coerceAtMost(totalCandlesNow)
+                        val plotW = (size.width - 82.dp.toPx()).coerceAtLeast(100f)
+                        val cWidth = plotW / count
+                        if (cWidth > 0f && dragAmount != 0f) {
+                            val maxP = (totalCandlesNow - count).coerceAtLeast(0).toFloat()
+                            val current = if (panOffset < 0f) maxP else panOffset.coerceIn(0f, maxP)
+                            panOffset = (current - dragAmount / cWidth).coerceIn(0f, maxP)
+                        }
+                    }
+                }
+                .pointerInput(Unit) {
+                    // Two fingers pinching = zoom. One-finger touches are never taken over here.
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        do {
+                            val event = awaitPointerEvent()
+                            if (event.changes.size >= 2) {
+                                val zoom = event.calculateZoom()
+                                if (zoom != 1f) {
+                                    zoomLevel = (zoomLevel * zoom).coerceIn(0.12f, 6.0f)
+                                    event.changes.forEach { it.consume() }
+                                }
+                            }
+                        } while (event.changes.any { it.pressed })
+                    }
+                }
+```
+
+--- CHANGE 33 ---
+FIND:
+```
+                // 1. ENTRY/LIMIT
+                val inZoneRight = !isStoppedRight && !isInvalidatedRight && currentPrice in minOf(tradeSetupPlan.entryZoneStart, tradeSetupPlan.entryZoneEnd)..maxOf(tradeSetupPlan.entryZoneStart, tradeSetupPlan.entryZoneEnd) && (tradeSetupPlan.verdictState == com.example.domain.model.SignalVerdictState.TRADE)
+                val entryPrice = tradeSetupPlan.recommendedEntry
+                val inBoundsEntry = entryPrice in minPrice..maxPrice
+                val isAboveEntry = entryPrice > maxPrice
+```
+REPLACE WITH:
+```
+                // 1. ENTRY/LIMIT
+                val inZoneRight = !isStoppedRight && !isInvalidatedRight && currentPrice in minOf(tradeSetupPlan.entryZoneStart, tradeSetupPlan.entryZoneEnd)..maxOf(tradeSetupPlan.entryZoneStart, tradeSetupPlan.entryZoneEnd) && (tradeSetupPlan.verdictState == com.example.domain.model.SignalVerdictState.TRADE)
+                val entryPrice = entryVal ?: tradeSetupPlan.recommendedEntry
+                val inBoundsEntry = entryPrice in minPrice..maxPrice
+                val isAboveEntry = entryPrice > maxPrice
+```
+
+--- CHANGE 34 ---
+FIND:
+```
+
+                // 5. SL
+                if (tradeSetupPlan.stopLoss > 0) {
+                    val slPrice = tradeSetupPlan.stopLoss
+                    val inBounds = slPrice in minPrice..maxPrice
+                    val isAbove = slPrice > maxPrice
+```
+REPLACE WITH:
+```
+
+                // 5. SL
+                if ((slVal ?: tradeSetupPlan.stopLoss) > 0) {
+                    val slPrice = slVal ?: tradeSetupPlan.stopLoss
+                    val inBounds = slPrice in minPrice..maxPrice
+                    val isAbove = slPrice > maxPrice
+```
+
+--- CHANGE 35 ---
+FIND:
+```
+        val workingSpecs = specs.sortedBy { it.idealY }
+
+        val topPinned = workingSpecs.filter { it.isPinnedTop }
+        val bottomPinned = workingSpecs.filter { it.isPinnedBottom }
+        val inBounds = workingSpecs.filter { !it.isPinnedTop && !it.isPinnedBottom }
+
+```
+REPLACE WITH:
+```
+        val workingSpecs = specs.sortedBy { it.idealY }
+
+        // Highest price always on top (TP3 above TP2 above TP1 ...), so the stack reads like a price ladder
+        val topPinned = workingSpecs.filter { it.isPinnedTop }.sortedByDescending { it.price }
+        val bottomPinned = workingSpecs.filter { it.isPinnedBottom }.sortedByDescending { it.price }
+        val inBounds = workingSpecs.filter { !it.isPinnedTop && !it.isPinnedBottom }
+
+```
+
+
+##################################################
+STEP 5: FILE app/src/main/java/com/example/MainActivity.kt
+PURPOSE: Remove the "TAURIC AI" badge from the top header.
+##################################################
+
+--- CHANGE 36 ---
+FIND:
+```
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(BullishGreen.copy(alpha = 0.15f))
+                        .padding(horizontal = 5.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = "TAURIC AI",
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = BullishGreen,
+                        maxLines = 1
+                    )
+                }
+                Spacer(modifier = Modifier.width(6.dp))
+                // Section 4 Header chip: "Engine-only" or "Engine + AI (n companies)"
+                val chipText = if (uiState.isEngineOnly) {
+```
+REPLACE WITH:
+```
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                // Section 4 Header chip: "Engine-only" or "Engine + AI (n companies)"
+                val chipText = if (uiState.isEngineOnly) {
+```
+
+
+##################################################
+STEP 6: FILE app/src/main/java/com/example/ui/screens/DashboardComponents.kt
+PURPOSE: PERFORMANCE: Smart-Money analysis was recalculated on every live price tick; now only when a new candle arrives.
+##################################################
+
+--- CHANGE 37 ---
+FIND:
+```
+            Spacer(modifier = Modifier.height(12.dp))
+
+            val smcData = remember(quote.candles) {
+                com.example.domain.analytics.QuantitativeEngine.computeSmartMoneyStructure(quote.candles)
+            }
+```
+REPLACE WITH:
+```
+            Spacer(modifier = Modifier.height(12.dp))
+
+            val smcData = remember(quote.symbol, quote.timeframe, quote.candles.size, quote.candles.lastOrNull()?.timestamp) {
+                com.example.domain.analytics.QuantitativeEngine.computeSmartMoneyStructure(quote.candles)
+            }
+```
+
+
+##################################################
+STEP 7: FILE app/src/main/java/com/example/domain/master/MasterVerdictEngine.kt
+PURPOSE: FIX ABSURD LEVELS: cap the stop distance per horizon (scalp 1.5%, intraday 3%, swing 8%, position 15%) and rebuild the 3 take-profits from that stop when the engine's stop was too far (it showed 35% stops on 15-minute scalps); also prevents a crash when the entry zone is inverted.
+##################################################
+
+--- CHANGE 38 ---
+FIND:
+```
+            atr = setupAtr
+        )
+        val limitPrice = setup.entryPrice.coerceIn(zoneMin, zoneMax)
+        val minStopGap = maxOf(setupAtr * 0.20, safeLivePrice * 0.0015)
+        val stopLoss = if (isLong) {
+            minOf(setup.stopLossPrice, zoneMin - minStopGap).coerceAtLeast(safeLivePrice * 0.05)
+        } else {
+            maxOf(setup.stopLossPrice, zoneMax + minStopGap)
+        }
+        val stopDist = abs(limitPrice - stopLoss).coerceAtLeast(safeLivePrice * 0.0005)
+        val tp1 = setup.takeProfit1
+        val tp2 = setup.takeProfit2
+        val tp3 = setup.takeProfit3
+        val tp1Rr = abs(tp1 - limitPrice) / stopDist
+        val tp2Rr = abs(tp2 - limitPrice) / stopDist
+```
+REPLACE WITH:
+```
+            atr = setupAtr
+        )
+        val limitPrice = setup.entryPrice.coerceIn(minOf(zoneMin, zoneMax), maxOf(zoneMin, zoneMax))
+        val minStopGap = maxOf(setupAtr * 0.20, safeLivePrice * 0.0015)
+        val rawStopLoss = if (isLong) {
+            minOf(setup.stopLossPrice, zoneMin - minStopGap).coerceAtLeast(safeLivePrice * 0.05)
+        } else {
+            maxOf(setup.stopLossPrice, zoneMax + minStopGap)
+        }
+        // SANITY CAP: a stop can never be absurdly far from the entry (bad or old data produced 35% stops
+        // on 15-minute scalps). If it is too far, the stop is pulled in and the targets are rebuilt from it.
+        val maxStopFraction = when (horizon) {
+            TradingHorizon.SCALP -> 0.015
+            TradingHorizon.INTRADAY -> 0.03
+            TradingHorizon.SWING -> 0.08
+            else -> 0.15
+        }
+        val maxStopDistance = safeLivePrice * maxStopFraction
+        val stopWasTooFar = abs(limitPrice - rawStopLoss) > maxStopDistance
+        val stopLoss = when {
+            !stopWasTooFar -> rawStopLoss
+            isLong -> limitPrice - maxStopDistance
+            else -> limitPrice + maxStopDistance
+        }
+        val stopDist = abs(limitPrice - stopLoss).coerceAtLeast(safeLivePrice * 0.0005)
+        val tp1 = if (stopWasTooFar) (if (isLong) limitPrice + stopDist * 1.5 else limitPrice - stopDist * 1.5) else setup.takeProfit1
+        val tp2 = if (stopWasTooFar) (if (isLong) limitPrice + stopDist * 2.5 else limitPrice - stopDist * 2.5) else setup.takeProfit2
+        val tp3 = if (stopWasTooFar) (if (isLong) limitPrice + stopDist * 4.0 else limitPrice - stopDist * 4.0) else setup.takeProfit3
+        val tp1Rr = abs(tp1 - limitPrice) / stopDist
+        val tp2Rr = abs(tp2 - limitPrice) / stopDist
+```
+
+
+##################################################
+STEP 8: FILE app/src/main/java/com/example/data/api/MarketDataService.kt
+PURPOSE: FIX FAKE 24h CHANGE (NVDA showed +415%): Yahoo's chartPreviousClose is the close from the START of the chart range; ignore it when it is far from the live price.
+##################################################
+
+--- CHANGE 39 ---
+FIND:
+```
+                val meta = resultObj.getJSONObject("meta")
+                val regularPrice = meta.optDouble("regularMarketPrice", 0.0)
+                val prevClose = meta.optDouble("chartPreviousClose", meta.optDouble("previousClose", regularPrice))
+                val metaDayHigh = meta.optDouble("regularMarketDayHigh", regularPrice * 1.01)
+                val metaDayLow = meta.optDouble("regularMarketDayLow", regularPrice * 0.99)
+```
+REPLACE WITH:
+```
+                val meta = resultObj.getJSONObject("meta")
+                val regularPrice = meta.optDouble("regularMarketPrice", 0.0)
+                val rawPrevClose = meta.optDouble("chartPreviousClose", meta.optDouble("previousClose", regularPrice))
+                // chartPreviousClose can be the close from the START of a long chart range (months/years ago),
+                // which produced fake changes like +415%. A real 24h move is never that big, so ignore it.
+                val prevClose = if (regularPrice > 0.0 && rawPrevClose > 0.0 &&
+                    (rawPrevClose / regularPrice > 1.6 || rawPrevClose / regularPrice < 0.4)
+                ) {
+                    meta.optDouble("previousClose", regularPrice).takeIf { it > 0.0 && it / regularPrice in 0.4..1.6 } ?: regularPrice
+                } else {
+                    rawPrevClose
+                }
+                val metaDayHigh = meta.optDouble("regularMarketDayHigh", regularPrice * 1.01)
+                val metaDayLow = meta.optDouble("regularMarketDayLow", regularPrice * 0.99)
+```
+
+
+##################################################
+STEP 9: NEW FILE app/src/main/java/com/example/ui/components/PlainTradeCard.kt
+PURPOSE: Beginner-friendly "WHAT TO DO NOW" card (buy / sell / wait, entry, stop-loss, 3 take-profits, risk vs reward, confidence). It only re-states numbers the engine already computed.
+##################################################
+Create this file with exactly this content:
+```kotlin
+package com.example.ui.components
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.domain.master.HorizonPlan
+import com.example.domain.master.MasterVerdict
+import com.example.domain.master.TradingHorizon
+import com.example.domain.model.PositionSide
+import com.example.domain.model.SetupGrade
+import com.example.domain.model.SignalVerdictState
+import com.example.domain.model.TradingMarketType
+import com.example.domain.util.PriceFormatter
+import com.example.ui.theme.BearishRed
+import com.example.ui.theme.BullishGreen
+import com.example.ui.theme.DarkBorder
+import com.example.ui.theme.DarkSurface
+import com.example.ui.theme.RiskAmber
+import com.example.ui.theme.TechCyan
+import com.example.ui.theme.TextMuted
+import com.example.ui.theme.TextPrimary
+import com.example.ui.theme.TextSecondary
+import java.util.Locale
+
+private fun plainPrice(v: Double?): String =
+    v?.takeIf { it.isFinite() && it > 0.0 }?.let { PriceFormatter.formatCurrency(it) } ?: "-"
+
+private fun plainPct(from: Double?, to: Double?): String {
+    if (from == null || to == null || !from.isFinite() || !to.isFinite() || from <= 0.0) return ""
+    return String.format(Locale.US, "%+.2f%%", (to - from) / from * 100.0)
+}
+
+private fun plainPctAbs(from: Double?, to: Double?): String {
+    if (from == null || to == null || !from.isFinite() || !to.isFinite() || from <= 0.0) return ""
+    return String.format(Locale.US, "%.2f%%", kotlin.math.abs(to - from) / from * 100.0)
+}
+
+/**
+ * A short, beginner-friendly answer to one question: "What should I do right now?"
+ * It only re-states what the engine already decided (same numbers as the big verdict card).
+ */
+@Composable
+fun PlainTradeCard(
+    verdict: MasterVerdict,
+    selectedHorizon: TradingHorizon,
+    isEngineOnly: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val plan: HorizonPlan? = verdict.horizonPlans[selectedHorizon] ?: verdict.bestPlan
+    val isSpot = verdict.marketType == TradingMarketType.SPOT
+    val hasLevels = plan != null &&
+        (plan.limitPrice ?: 0.0) > 0.0 &&
+        (plan.stopLoss ?: 0.0) > 0.0
+
+    // ---- 1. Decide the headline + colour -------------------------------------------------
+    val side: PositionSide? = plan?.side
+    val title: String
+    val accent: Color
+    val subtitle: String
+
+    if (plan == null || selectedHorizon == TradingHorizon.OUTLOOK) {
+        title = "LONG-TERM VIEW ONLY"
+        accent = TechCyan
+        subtitle = "This view gives background context, not entries. Tap Intraday or Swing in the verdict card below for trade levels."
+    } else if (plan.state == SignalVerdictState.TRADE && side != null && hasLevels) {
+        if (side == PositionSide.LONG) {
+            title = "BUY (go long)"
+            accent = BullishGreen
+            subtitle = "The engine sees a valid buy setup now."
+        } else if (isSpot) {
+            title = "DON'T BUY - price may fall"
+            accent = BearishRed
+            subtitle = "On Spot you can only sell what you already own. To profit from a fall, switch to Futures and open a short."
+        } else {
+            title = "SELL (go short)"
+            accent = BearishRed
+            subtitle = "The engine sees a valid sell setup now."
+        }
+    } else if (plan.state == SignalVerdictState.WAIT) {
+        title = "WAIT - do not enter yet"
+        accent = RiskAmber
+        subtitle = if (plan.needs.isNotBlank()) "Needs: " + plan.needs else "Conditions are not ready yet."
+    } else {
+        title = "STAY OUT - no clear setup"
+        accent = TextSecondary
+        val why = plan.vetoes.firstOrNull() ?: plan.conflicts.firstOrNull() ?: verdict.plainSummaryHeadline
+        subtitle = if (why.isNotBlank()) why else "Nothing worth trading right now."
+    }
+
+    val confidenceText = when (plan?.grade) {
+        SetupGrade.A -> "High"
+        SetupGrade.B -> "Medium"
+        SetupGrade.C_WATCH -> "Low (watch only)"
+        else -> "-"
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(DarkSurface)
+            .border(1.2.dp, accent.copy(alpha = 0.7f), RoundedCornerShape(14.dp))
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = "WHAT TO DO NOW  -  " + selectedHorizon.label + " view",
+            color = TextMuted,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            text = title,
+            color = accent,
+            fontSize = 20.sp,
+            fontWeight = FontWeight.ExtraBold
+        )
+        Text(
+            text = subtitle,
+            color = TextSecondary,
+            fontSize = 12.sp,
+            lineHeight = 17.sp
+        )
+
+        if (plan != null && hasLevels && selectedHorizon != TradingHorizon.OUTLOOK) {
+            val limit = plan.limitPrice
+            val isWait = plan.state != SignalVerdictState.TRADE
+            val orderWord = if (side == PositionSide.SHORT) "SELL" else "BUY"
+
+            Spacer(modifier = Modifier.height(2.dp))
+            PlainRow(
+                label = "Price now",
+                value = plainPrice(verdict.livePrice)
+            )
+            PlainRow(
+                label = if (isWait) "If it triggers: $orderWord LIMIT at" else "Enter with a $orderWord LIMIT order at",
+                value = plainPrice(limit) +
+                    (if (plan.entryZoneMin != null && plan.entryZoneMax != null && (plan.entryZoneMin ?: 0.0) > 0.0)
+                        "\n(zone " + plainPrice(plan.entryZoneMin) + " - " + plainPrice(plan.entryZoneMax) + ")"
+                    else ""),
+                valueColor = TechCyan
+            )
+            PlainRow(
+                label = "Stop-loss (exit here if wrong)",
+                value = plainPrice(plan.stopLoss) + "\n(about " + plainPctAbs(limit, plan.stopLoss) + " risk)",
+                valueColor = BearishRed
+            )
+            PlainRow(
+                label = "Take profit 1 - sell half",
+                value = plainPrice(plan.tp1) + "\n(" + plainPct(limit, plan.tp1) + ")",
+                valueColor = BullishGreen
+            )
+            PlainRow(
+                label = "Take profit 2 - sell 30%",
+                value = plainPrice(plan.tp2) + "\n(" + plainPct(limit, plan.tp2) + ")",
+                valueColor = BullishGreen
+            )
+            PlainRow(
+                label = "Take profit 3 - sell the rest",
+                value = plainPrice(plan.tp3) + "\n(" + plainPct(limit, plan.tp3) + ")",
+                valueColor = BullishGreen
+            )
+
+            val rr = plan.tp1Rr
+            if (rr != null && rr.isFinite() && rr > 0.0) {
+                PlainRow(
+                    label = "Reward vs risk (to take profit 1)",
+                    value = "Risk 1 to win " + String.format(Locale.US, "%.1f", rr)
+                )
+            }
+            val pWinPct = (plan.pWin * 100.0).coerceIn(0.0, 100.0)
+            PlainRow(
+                label = "Engine's chance of reaching take profit 1 before the stop",
+                value = String.format(Locale.US, "%.0f%%", pWinPct) +
+                    (if (plan.sampleN < 30) "\n(few past examples - rough)" else "")
+            )
+            PlainRow(label = "Confidence", value = confidenceText)
+
+            val minutesLeft = (plan.validUntilMs - System.currentTimeMillis()) / 60_000L
+            if (minutesLeft in 1..(60L * 24L * 14L)) {
+                val h = minutesLeft / 60L
+                val m = minutesLeft % 60L
+                PlainRow(
+                    label = "This idea stays valid for about",
+                    value = if (h > 0L) "${h}h ${m}m" else "${m}m"
+                )
+            }
+        }
+
+        Text(
+            text = "Tip: use a LIMIT order, risk only 1% of your account per trade, and never skip the stop-loss. " +
+                (if (isEngineOnly) "Signals come from the built-in engine (no AI key connected). " else "") +
+                "These are estimates, not promises.",
+            color = TextMuted,
+            fontSize = 10.sp,
+            lineHeight = 14.sp
+        )
+    }
+}
+
+@Composable
+private fun PlainRow(
+    label: String,
+    value: String,
+    valueColor: Color = TextPrimary
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .border(0.5.dp, DarkBorder, RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            color = TextSecondary,
+            fontSize = 11.sp,
+            lineHeight = 15.sp,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(
+            text = value,
+            color = valueColor,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.End,
+            lineHeight = 17.sp
+        )
+    }
+}
+
+```
+
+
+##################################################
+STEP 10: FILE app/src/main/java/com/example/ui/screens/DashboardScreen.kt
+PURPOSE: Show a correct feed label (not "Binance" for stocks) and show the new PlainTradeCard right under the price card.
+##################################################
+
+--- CHANGE 40 ---
+FIND:
+```
+import com.example.ui.components.HorizonLadderTable
+import com.example.ui.components.MasterVerdictCard
+import com.example.ui.theme.AgentPurple
+import com.example.ui.theme.BullishGreen
+```
+REPLACE WITH:
+```
+import com.example.ui.components.HorizonLadderTable
+import com.example.ui.components.MasterVerdictCard
+import com.example.ui.components.PlainTradeCard
+import com.example.ui.theme.AgentPurple
+import com.example.ui.theme.BullishGreen
+```
+
+--- CHANGE 41 ---
+FIND:
+```
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // 5. Result Chart (Candlestick Graph with Entry, TP1, TP2, TP3, and SL overlays)
+                    val chartHeight = if (isLandscape) 190 else 240
+```
+REPLACE WITH:
+```
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // 4b. Plain-English "what to do now" card (beginner friendly)
+                    uiState.masterVerdict?.let { mv ->
+                        PlainTradeCard(
+                            verdict = mv,
+                            selectedHorizon = uiState.selectedHorizon,
+                            isEngineOnly = uiState.isEngineOnly
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                    }
+
+                    // 5. Result Chart (Candlestick Graph with Entry, TP1, TP2, TP3, and SL overlays)
+                    val chartHeight = if (isLandscape) 190 else 240
+```
+
+--- CHANGE 42 ---
+FIND:
+```
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "LIVE TAPE (Binance)",
+                        color = BullishGreen,
+                        fontSize = 9.sp,
+```
+REPLACE WITH:
+```
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = if (quote.assetType == com.example.domain.model.AssetType.CRYPTO) "LIVE TAPE (Binance)" else "STOCK FEED (Yahoo, can be delayed)",
+                        color = BullishGreen,
+                        fontSize = 9.sp,
+```
+
+
+==================================================================
+END. Rebuild and make sure: the app starts, BTC and NVDA load without freezing, the chart can be dragged sideways while the page still scrolls up/down, and the header no longer says TAURIC AI.

@@ -340,7 +340,7 @@ object ReplayEngine {
         val rList = mutableListOf<Double>()
 
         pool.sessions.forEach { session ->
-            val startIdx = plan.timeOfDayIndex.coerceIn(0, session.bars.lastIndex)
+            val startIdx = plan.timeOfDayIndex.coerceIn(0, maxOf(0, session.bars.lastIndex))
             val sessionBars = session.bars.drop(startIdx).take(plan.horizonBars)
             if (sessionBars.isNotEmpty()) {
                 fired++
@@ -420,8 +420,15 @@ object ReplayEngine {
         sessionsCount: Int = 0,
         numReplays: Int = DEFAULT_NUM_REPLAYS
     ): ReplayVerdict {
-        if (resolvedCount < 200) {
-            val headline = "Not enough resolved replays ($resolvedCount/200 across $sessionsCount sessions)"
+        // If price reached neither target nor stop in most simulations, the replay cannot judge the plan.
+        // (Before, 3% "stop first" + 97% "neither" was shown as "Strongly toward the stop", which is misleading.)
+        val mostlyOpen = neitherPct > 75.0
+        if (resolvedCount < 200 || mostlyOpen) {
+            val headline = if (mostlyOpen && resolvedCount >= 200) {
+                "Inconclusive: in ${String.format(Locale.US, "%.0f", neitherPct)}% of simulations price hit neither target nor stop in this time window"
+            } else {
+                "Not enough resolved replays ($resolvedCount/200 across $sessionsCount sessions)"
+            }
             val details = mutableListOf(
                 "Only $resolvedCount/$numReplays simulated paths touched target or stop within the horizon (minimum 200 resolved paths required for a directional lean).",
                 "Target/stop distance is too wide relative to horizon volatility (${String.format(Locale.US, "%.1f", neitherPct)}% remained open at horizon)."
