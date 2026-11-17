@@ -782,6 +782,15 @@ fun CandlestickChart(
         val isExpanded = com.example.ui.adaptive.AdaptiveLayoutUtils.isExpanded
         val chartCanvasHeight = if (isLandscape) 190.dp else if (isExpanded) 290.dp else 255.dp
         val density = LocalDensity.current
+        val hasLevelBadges = tradeSetupPlan != null &&
+            showTargetsOverlay &&
+            tradeSetupPlan.isAvailable &&
+            tradeSetupPlan.recommendedEntry > 0.0 &&
+            tradeSetupPlan.stopLoss > 0.0 &&
+            tradeSetupPlan.verdictState != SignalVerdictState.NO_TRADE
+        val hasCone = (activeHorizonPlan?.replayFanBands?.isNotEmpty() == true) && showTargetsOverlay && hasLevelBadges
+        val (rightAxisDp, coneDp) = computeChartMarginsDp(hasLevelBadges = hasLevelBadges, hasCone = hasCone)
+        val activeRightMarginPx by rememberUpdatedState(with(density) { (rightAxisDp + coneDp).dp.toPx() })
 
         // Canvas Chart with Overlays and Gestures
         Canvas(
@@ -792,8 +801,7 @@ fun CandlestickChart(
                     detectTapGestures(
                         onTap = { offset ->
                             if (visibleCountNow > 0) {
-                                val rightMargin = 82.dp.toPx()
-                                val plotW = (size.width - rightMargin).coerceAtLeast(100f)
+                                val plotW = (size.width - activeRightMarginPx).coerceAtLeast(100f)
                                 if (offset.x in 0f..plotW) {
                                     val cWidth = plotW / visibleCountNow
                                     if (cWidth > 0) {
@@ -811,7 +819,7 @@ fun CandlestickChart(
                     detectHorizontalDragGestures { change, dragAmount ->
                         change.consume()
                         val count = ((baseVisibleCount / zoomLevel).toInt()).coerceAtLeast(4).coerceAtMost(totalCandlesNow)
-                        val plotW = (size.width - 82.dp.toPx()).coerceAtLeast(100f)
+                        val plotW = (size.width - activeRightMarginPx).coerceAtLeast(100f)
                         val cWidth = plotW / count
                         if (cWidth > 0f && dragAmount != 0f) {
                             val maxP = (totalCandlesNow - count).coerceAtLeast(0).toFloat()
@@ -841,16 +849,35 @@ fun CandlestickChart(
             val canvasHeight = size.height
             val chartHeight = canvasHeight * 0.80f
             val volumeHeight = canvasHeight * 0.20f
-            val rightBadgeMargin = with(density) { 82.dp.toPx() }
-            val hasCone = activeHorizonPlan?.replayFanBands?.isNotEmpty() == true
-            val coneMargin = if (hasCone) with(density) { 46.dp.toPx() } else 0f
+            val rightBadgeMargin = with(density) { rightAxisDp.dp.toPx() }
+            val coneMargin = with(density) { coneDp.dp.toPx() }
             val plotWidth = (canvasWidth - rightBadgeMargin - coneMargin).coerceAtLeast(100f)
+            val axisLeftX = plotWidth + coneMargin
             val candleCount = visibleCandles.size
             val candleWidth = plotWidth / candleCount
 
             fun priceToY(price: Double): Float {
                 return (chartHeight - ((price - minPrice) / priceRange * chartHeight).toFloat()).coerceIn(0f, chartHeight)
             }
+
+            // Subtle horizontal price gridlines + right Y-axis divider
+            val gridFracs = floatArrayOf(0.12f, 0.37f, 0.62f, 0.87f)
+            for (frac in gridFracs) {
+                val gy = chartHeight * frac
+                drawLine(
+                    color = DarkBorder.copy(alpha = 0.55f),
+                    start = Offset(0f, gy),
+                    end = Offset(axisLeftX, gy),
+                    strokeWidth = 0.9f,
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 6f), 0f)
+                )
+            }
+            drawLine(
+                color = DarkBorder.copy(alpha = 0.7f),
+                start = Offset(axisLeftX, 0f),
+                end = Offset(axisLeftX, chartHeight),
+                strokeWidth = 1f
+            )
 
             // OVERLAY: Volume Profile horizontal histogram (16 buckets across visible range)
             if (showVolProfileOverlay && visibleCandles.isNotEmpty() && priceRange > 0.0) {
@@ -1189,21 +1216,81 @@ fun CandlestickChart(
             if (liveMarkerPrice > 0.0) {
                 val liveY = priceToY(liveMarkerPrice)
                 drawLine(
-                    color = Color.White.copy(alpha = 0.5f),
+                    color = Color.White.copy(alpha = 0.45f),
                     start = Offset(0f, liveY),
-                    end = Offset(canvasWidth - rightBadgeMargin, liveY),
+                    end = Offset(axisLeftX, liveY),
                     strokeWidth = 1f,
                     pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 4f), 0f)
                 )
                 drawCircle(
                     color = TechCyan,
-                    radius = 4f,
+                    radius = 3.5f,
                     center = Offset(plotWidth, liveY)
                 )
             }
 
+            // Always draw crisp right-edge Y-axis price ticks (behind trade badges, or full scale when no trade badges)
+            if (!hasLevelBadges && priceRange > 0.0) {
+                val axisPaint = Paint().apply {
+                    isAntiAlias = true
+                    color = TextMuted.toArgb()
+                    textSize = with(density) { 8.5.sp.toPx() }
+                }
+                val liveYClamped = if (liveMarkerPrice > 0.0) priceToY(liveMarkerPrice) else -999f
+                val padX = axisLeftX + with(density) { 4.dp.toPx() }
+                for (frac in gridFracs) {
+                    val gy = chartHeight * frac
+                    if (kotlin.math.abs(gy - liveYClamped) > with(density) { 14.dp.toPx() }) {
+                        val gridPrice = maxPrice - (frac * priceRange)
+                        val tickLabel = if (gridPrice >= 1000.0) {
+                            String.format(Locale.US, "$%.0f", gridPrice)
+                        } else {
+                            "$${format2(gridPrice)}"
+                        }
+                        drawContext.canvas.nativeCanvas.drawText(
+                            tickLabel,
+                            padX,
+                            (gy + with(density) { 3.dp.toPx() }).coerceIn(with(density) { 10.dp.toPx() }, chartHeight - 2f),
+                            axisPaint
+                        )
+                    }
+                }
+                if (liveMarkerPrice > 0.0) {
+                    val pillH = with(density) { 16.dp.toPx() }
+                    val pillY = (liveYClamped - pillH / 2f).coerceIn(1f, chartHeight - pillH - 1f)
+                    val pillW = (canvasWidth - padX - 1f).coerceAtLeast(with(density) { 38.dp.toPx() })
+                    val cr = with(density) { 3.dp.toPx() }
+                    drawRoundRect(
+                        color = Color(0xFF0E2233),
+                        topLeft = Offset(padX - 2f, pillY),
+                        size = Size(pillW, pillH),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(cr, cr)
+                    )
+                    drawRoundRect(
+                        color = TechCyan.copy(alpha = 0.85f),
+                        topLeft = Offset(padX - 2f, pillY),
+                        size = Size(pillW, pillH),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(cr, cr),
+                        style = Stroke(width = with(density) { 1.dp.toPx() })
+                    )
+                    val livePaint = Paint().apply {
+                        isAntiAlias = true
+                        color = TechCyan.toArgb()
+                        textSize = with(density) { 8.5.sp.toPx() }
+                        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                    }
+                    val liveStr = if (liveMarkerPrice >= 1000.0) String.format(Locale.US, "$%.0f", liveMarkerPrice) else "$${format2(liveMarkerPrice)}"
+                    drawContext.canvas.nativeCanvas.drawText(
+                        liveStr,
+                        padX + with(density) { 2.dp.toPx() },
+                        pillY + pillH * 0.72f,
+                        livePaint
+                    )
+                }
+            }
+
             // Draw right margin level badges using nativeCanvas with anti-collision layout
-            if (tradeSetupPlan != null && showTargetsOverlay && tradeSetupPlan.isAvailable && tradeSetupPlan.recommendedEntry > 0.0 && tradeSetupPlan.stopLoss > 0.0 && tradeSetupPlan.verdictState != com.example.domain.model.SignalVerdictState.NO_TRADE) {
+            if (hasLevelBadges && tradeSetupPlan != null) {
                 val badgeTextSize = with(density) { 9.sp.toPx() }
                 val badgeHeight = with(density) { 18.dp.toPx() }
                 val textBaselineOffset = badgeHeight * 0.72f
@@ -1879,6 +1966,12 @@ fun layoutNonOverlappingLabelYs(
         restored[origIdx] = pos[sortedIdx]
     }
     return restored.toList()
+}
+
+fun computeChartMarginsDp(hasLevelBadges: Boolean, hasCone: Boolean): Pair<Float, Float> {
+    val rightAxisDp = if (hasLevelBadges) 74f else 54f
+    val coneDp = if (hasCone) 28f else 0f
+    return rightAxisDp to coneDp
 }
 
 fun format2(num: Double): String {

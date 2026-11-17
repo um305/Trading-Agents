@@ -7,6 +7,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -38,6 +40,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.domain.model.EntryOrderType
@@ -93,10 +96,11 @@ fun TradeExecutionSetupCard(
             .testTag("trade_execution_setup_card")
     ) {
         // Header
-        Row(
+        @OptIn(ExperimentalLayoutApi::class)
+        FlowRow(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
@@ -150,7 +154,8 @@ fun TradeExecutionSetupCard(
                         text = "START LONG",
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        color = if (isLong) Color.Black else TextSecondary
+                        color = if (isLong) Color.Black else TextSecondary,
+                        maxLines = 1
                     )
                 }
 
@@ -166,7 +171,8 @@ fun TradeExecutionSetupCard(
                         text = "START SHORT",
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        color = if (!isLong) Color.White else TextSecondary
+                        color = if (!isLong) Color.White else TextSecondary,
+                        maxLines = 1
                     )
                 }
             }
@@ -293,7 +299,10 @@ fun TradeExecutionSetupCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
                         Box(
                             modifier = Modifier
                                 .size(8.dp)
@@ -305,14 +314,18 @@ fun TradeExecutionSetupCard(
                             text = statusLabel,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = statusColor
+                            color = statusColor,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
+                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = "${plan.timeframe.label} PLAN • FORWARD EXECUTION",
                         fontSize = 8.sp,
                         fontWeight = FontWeight.Bold,
-                        color = TextMuted
+                        color = TextMuted,
+                        maxLines = 1
                     )
                 }
             }
@@ -527,8 +540,12 @@ fun TradeExecutionSetupCard(
                             text = "WHY THIS ENTRY • CONFLUENCE ${plan.confluenceScore}/100",
                             fontSize = 10.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = TechCyan
+                            color = TechCyan,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
+                        Spacer(modifier = Modifier.width(6.dp))
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(4.dp))
@@ -539,7 +556,8 @@ fun TradeExecutionSetupCard(
                                 text = plan.entryType.label,
                                 fontSize = 9.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = TechCyan
+                                color = TechCyan,
+                                maxLines = 1
                             )
                         }
                     }

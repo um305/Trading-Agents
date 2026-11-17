@@ -1902,11 +1902,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 targetMarketType
             }
             val quote = if (routedMarket != targetMarketType && initialQuote.assetType == AssetType.CRYPTO) {
-                repository.getQuote(clean, currentTf, routedMarket, _uiState.value.selectedExchange, initialQuote.assetType).getOrNull() ?: initialQuote
+                withTimeoutOrNull(10_000L) {
+                    repository.getQuote(clean, currentTf, routedMarket, _uiState.value.selectedExchange, initialQuote.assetType).getOrNull()
+                } ?: initialQuote
             } else {
                 initialQuote
             }
-            val exchanges = repository.fetchRealExchangeQuotes(clean, quote.assetType, routedMarket, quote.currentPrice)
+            val exchanges = withTimeoutOrNull(10_000L) {
+                repository.fetchRealExchangeQuotes(clean, quote.assetType, routedMarket, quote.currentPrice)
+            } ?: emptyList()
 
             val cacheKey = getPlanCacheKey(clean, routedMarket, currentTf)
             val cachedPlan = _tradePlansCache[cacheKey]
@@ -2970,7 +2974,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     riskSettings = state.riskSettings,
                     aiShiftPoints = synth?.aiShiftPoints ?: 0,
                     aiShiftModelName = synth?.aiShiftModelName,
-                    aiSummary = synth?.unifiedConsensusSummary?.takeIf { !state.isEngineOnly && it.isNotBlank() }
+                    aiSummary = synth?.unifiedConsensusSummary?.takeIf { !state.isEngineOnly && it.isNotBlank() },
+                    seedCandlesByTf = if (activeQuote.candles.isNotEmpty()) mapOf(activeQuote.timeframe to activeQuote.candles) else emptyMap()
                 )
             }.getOrNull()
 

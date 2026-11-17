@@ -45,8 +45,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.api.MarketDataService
 import com.example.domain.model.CryptoExchange
 import com.example.domain.model.ExchangePriceQuote
 import com.example.domain.util.PriceFormatter
@@ -209,7 +211,10 @@ fun ExchangeDataSourceSwitcher(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
                             Box(
                                 modifier = Modifier
                                     .size(10.dp)
@@ -217,20 +222,23 @@ fun ExchangeDataSourceSwitcher(
                                     .background(Color(selectedExchange.colorHex))
                             )
                             Spacer(modifier = Modifier.width(8.dp))
-                            Column {
+                            Column(modifier = Modifier.weight(1f)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(
                                         text = selectedExchange.displayName,
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = TextPrimary
+                                        color = TextPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
                                         text = "LIVE TAPE",
                                         fontSize = 9.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = BullishGreen
+                                        color = BullishGreen,
+                                        maxLines = 1
                                     )
                                 }
                                 val activeQuote = exchangeQuotes.find { it.exchange == selectedExchange }
@@ -238,13 +246,17 @@ fun ExchangeDataSourceSwitcher(
                                     Text(
                                         text = "${PriceFormatter.formatCurrency(activeQuote.price)} • Spread: ${PriceFormatter.formatPercent(activeQuote.spreadPercent, 3)} • Latency: ${activeQuote.latencyMs}ms",
                                         fontSize = 10.sp,
-                                        color = TextSecondary
+                                        color = TextSecondary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 } else if (activeQuote?.unavailableReason != null) {
                                     Text(
-                                        text = "Unavailable - ${activeQuote.unavailableReason}",
+                                        text = "Unavailable • ${MarketDataService.cleanUnavailableReason(activeQuote.unavailableReason)}",
                                         fontSize = 10.sp,
-                                        color = com.example.ui.theme.BearishRed
+                                        color = com.example.ui.theme.BearishRed,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
                             }
@@ -341,9 +353,11 @@ fun ExchangeDataSourceSwitcher(
                                     Column(horizontalAlignment = Alignment.End) {
                                         if (quote?.unavailableReason != null) {
                                             Text(
-                                                text = "Unavailable - ${quote.unavailableReason}",
+                                                text = "Unavailable • ${MarketDataService.cleanUnavailableReason(quote.unavailableReason)}",
                                                 fontSize = 10.sp,
-                                                color = com.example.ui.theme.BearishRed
+                                                color = com.example.ui.theme.BearishRed,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
                                             )
                                         } else if (price > 0.0) {
                                             Text(
@@ -423,12 +437,12 @@ fun ExchangeDataSourceSwitcher(
 
                         Box(
                             modifier = Modifier
-                                .widthIn(min = 140.dp)
+                                .width(156.dp)
                                 .clip(RoundedCornerShape(10.dp))
                                 .background(animatedBgColor)
                                 .border(1.dp, animatedBorderColor, RoundedCornerShape(10.dp))
                                 .clickable { onSelectExchange(exchange) }
-                                .padding(horizontal = 12.dp, vertical = 9.dp)
+                                .padding(horizontal = 10.dp, vertical = 9.dp)
                                 .testTag("exchange_tab_${exchange.id}")
                         ) {
                             Column(horizontalAlignment = Alignment.Start) {
@@ -480,15 +494,17 @@ fun ExchangeDataSourceSwitcher(
 
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
                                     if (quote?.unavailableReason != null) {
                                         Text(
-                                            text = "Unavailable - ${quote.unavailableReason}",
+                                            text = "Unavailable • ${MarketDataService.cleanUnavailableReason(quote.unavailableReason)}",
                                             fontSize = 9.sp,
                                             color = com.example.ui.theme.BearishRed,
-                                            maxLines = 1
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f)
                                         )
                                     } else if (price > 0.0) {
                                         Text(
@@ -497,7 +513,9 @@ fun ExchangeDataSourceSwitcher(
                                             fontWeight = FontWeight.Bold,
                                             color = TextPrimary,
                                             maxLines = 1,
-                                            softWrap = false
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f)
                                         )
                                     } else {
                                         Text(
@@ -505,14 +523,17 @@ fun ExchangeDataSourceSwitcher(
                                             fontSize = 11.sp,
                                             color = TextSecondary,
                                             maxLines = 1,
-                                            softWrap = false
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f)
                                         )
                                     }
 
                                     Text(
                                         text = if (quote?.isStale == true) "STALE" else "${latency}ms",
                                         fontSize = 9.sp,
-                                        color = if (quote?.isStale == true) com.example.ui.theme.RiskAmber else if (latency < 25) BullishGreen else TextMuted
+                                        color = if (quote?.isStale == true) com.example.ui.theme.RiskAmber else if (latency < 25) BullishGreen else TextMuted,
+                                        maxLines = 1
                                     )
                                 }
                             }
@@ -530,7 +551,10 @@ fun ExchangeDataSourceSwitcher(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
                 Icon(
                     imageVector = Icons.Default.Speed,
                     contentDescription = null,
@@ -541,15 +565,18 @@ fun ExchangeDataSourceSwitcher(
                 Text(
                     text = "Streaming real-time order flow & candles for $symbol",
                     fontSize = 10.sp,
-                    color = TextSecondary
+                    color = TextSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
-
+            Spacer(modifier = Modifier.width(8.dp))
             Text(
                 text = "${selectedExchange.displayName} API",
                 fontSize = 10.sp,
                 fontWeight = FontWeight.SemiBold,
-                color = Color(selectedExchange.colorHex)
+                color = Color(selectedExchange.colorHex),
+                maxLines = 1
             )
         }
     }

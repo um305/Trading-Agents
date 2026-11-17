@@ -6,6 +6,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -193,7 +195,8 @@ fun ReplayAgentCard(
             }
 
             // Active Conservative / Calibration Banner
-            Row(
+            @OptIn(ExperimentalLayoutApi::class)
+            FlowRow(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(6.dp))
@@ -201,7 +204,7 @@ fun ReplayAgentCard(
                     .border(1.dp, TechCyan.copy(alpha = 0.35f), RoundedCornerShape(6.dp))
                     .padding(horizontal = 9.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 Text(
                     text = if (replayResult.verdict.lean == ReplayLean.INSUFFICIENT_RESOLVED) "RESOLVED PATHS" else "VERDICT & CALIBRATION P(WIN)",
@@ -361,35 +364,39 @@ fun ReplayAgentCard(
                     .clip(RoundedCornerShape(6.dp))
                     .background(DarkSurfaceElevated)
                     .padding(horizontal = 10.dp, vertical = 7.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
-                    Text("Break-even 1/(1+R)", color = TextMuted, fontSize = 8.sp)
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Break-even 1/(1+R)", color = TextMuted, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
                         text = PriceFormatter.formatPercent(replayResult.verdict.breakEvenTargetShare * 100.0, 1),
                         color = TextSecondary,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp
+                        fontSize = 11.sp,
+                        maxLines = 1
                     )
                 }
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("Observed Target-First", color = TextMuted, fontSize = 8.sp)
+                Column(modifier = Modifier.weight(1.2f), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Observed Target-First", color = TextMuted, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     val diff = (replayResult.verdict.observedTargetShare - replayResult.verdict.breakEvenTargetShare) * 100.0
                     Text(
                         text = "${PriceFormatter.formatPercent(replayResult.verdict.observedTargetShare * 100.0, 1)} (${PriceFormatter.formatSignedPercent(diff, 1)})",
                         color = if (diff >= 0) BullishGreen else BearishRed,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
-                Column(horizontalAlignment = Alignment.End) {
-                    Text("Average Net R", color = TextMuted, fontSize = 8.sp)
+                Column(modifier = Modifier.weight(0.9f), horizontalAlignment = Alignment.End) {
+                    Text("Average Net R", color = TextMuted, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
                         text = PriceFormatter.formatRMultiple(replayResult.netAverageR),
                         color = if (replayResult.netAverageR >= 0) BullishGreen else BearishRed,
                         fontWeight = FontWeight.ExtraBold,
-                        fontSize = 11.sp
+                        fontSize = 11.sp,
+                        maxLines = 1
                     )
                 }
             }
@@ -509,9 +516,13 @@ private fun ReplayModeComparisonCard(
                 text = metrics.modeLabel.uppercase(Locale.US),
                 color = if (isSelectedConservative) TechCyan else TextSecondary,
                 fontSize = 9.sp,
-                fontWeight = FontWeight.ExtraBold
+                fontWeight = FontWeight.ExtraBold,
+                modifier = Modifier.weight(1f, fill = false),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
             if (isSelectedConservative) {
+                Spacer(modifier = Modifier.width(4.dp))
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(4.dp))

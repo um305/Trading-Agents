@@ -86,6 +86,7 @@ class AnalysisCoordinator(
         aiShiftPoints: Int = 0,
         aiShiftModelName: String? = null,
         aiSummary: String? = null,
+        seedCandlesByTf: Map<Timeframe, List<CandlePoint>> = emptyMap(),
         nowMs: Long = System.currentTimeMillis()
     ): MasterVerdict? {
         val cleanSym = symbol.trim().uppercase(Locale.US)
@@ -157,6 +158,18 @@ class AnalysisCoordinator(
                     if (batch != null && batch.candles.isNotEmpty()) {
                         candlesByTf[tf] = batch.candles
                         ageByTf[tf] = batch.dataAgeMs
+                    }
+                }
+                for ((tf, seedList) in seedCandlesByTf) {
+                    if (candlesByTf[tf].isNullOrEmpty() && seedList.isNotEmpty()) {
+                        val effStep = if (tf == Timeframe.FIVE_DAYS) 7L * 86_400_000L else tf.stepMillis
+                        val closedSeed = seedList.filter { it.isClosed && it.open > 0.0 && it.close > 0.0 && it.high >= it.low }
+                            .ifEmpty { seedList.dropLast(1).filter { it.open > 0.0 && it.close > 0.0 && it.high >= it.low } }
+                        if (closedSeed.isNotEmpty()) {
+                            candlesByTf[tf] = closedSeed
+                            val lastClose = closedSeed.maxOf { it.effectiveCloseTimestamp(effStep) }
+                            ageByTf[tf] = (nowMs - lastClose).coerceAtLeast(0L)
+                        }
                     }
                 }
 

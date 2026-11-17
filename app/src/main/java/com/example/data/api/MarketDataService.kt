@@ -45,9 +45,10 @@ class MarketDataService {
     private val secRateLimitMutex = Mutex()
     private var secLastRequestAtMs: Long = 0L
 
-    // Part A §6: Binance API weight tracking & rate-limit backoff + Yahoo throttle
+    // Part A §6: Binance API weight tracking & rate-limit backoff + Yahoo throttle + Futures geo-block cache
     private val lastBinanceUsedWeight1m = java.util.concurrent.atomic.AtomicInteger(0)
     private val binanceCooldownUntilMs = java.util.concurrent.atomic.AtomicLong(0L)
+    private val fapiGeoBlockedUntilMs = java.util.concurrent.atomic.AtomicLong(0L)
     private val yahooRateMutex = Mutex()
     private var yahooLastRequestAtMs: Long = 0L
 
@@ -66,6 +67,73 @@ class MarketDataService {
     }
 
     companion object {
+        fun cleanUnavailableReason(reason: String?): String {
+            var cleaned = reason?.trim().orEmpty()
+            while (cleaned.startsWith("Unavailable", ignoreCase = true)) {
+                cleaned = cleaned.removePrefix("Unavailable").removePrefix("unavailable")
+                    .trimStart(' ', '-', ':', '•', '·').trim()
+            }
+            return when {
+                cleaned.equals("HTTP 451", ignoreCase = true) -> "Geo-blocked (HTTP 451)"
+                cleaned.equals("HTTP 403", ignoreCase = true) -> "Restricted (HTTP 403)"
+                cleaned.isBlank() -> "No quote"
+                else -> cleaned
+            }
+        }
+
+        fun sortExchangeQuotesLiveFirst(quotes: List<ExchangePriceQuote>): List<ExchangePriceQuote> {
+            return quotes.sortedBy { q ->
+                if (q.unavailableReason == null && q.price > 0.0) 0 else 1
+            }
+        }
+
+        fun toOkxBarInterval(timeframe: Timeframe): String = when (timeframe) {
+            Timeframe.ONE_MIN -> "1m"
+            Timeframe.FIVE_MIN -> "5m"
+            Timeframe.FIFTEEN_MIN -> "15m"
+            Timeframe.THIRTY_MIN -> "30m"
+            Timeframe.ONE_HOUR -> "1H"
+            Timeframe.FOUR_HOURS -> "4H"
+            Timeframe.ONE_DAY -> "1D"
+            Timeframe.FIVE_DAYS -> "1W"
+            Timeframe.ONE_MONTH -> "1M"
+            Timeframe.THREE_MONTHS -> "3M"
+            Timeframe.ONE_YEAR -> "1Y"
+        }
+
+        fun parseOkxCandlesJson(
+            jsonString: String,
+            timeframe: Timeframe,
+            nowMs: Long = System.currentTimeMillis()
+        ): List<CandlePoint> {
+            return try {
+                val root = JSONObject(jsonString)
+                val data = root.optJSONArray("data") ?: return emptyList()
+                val effStep = if (timeframe == Timeframe.FIVE_DAYS) 7L * 86_400_000L else timeframe.stepMillis
+                val out = mutableListOf<CandlePoint>()
+                for (i in 0 until data.length()) {
+                    val row = data.optJSONArray(i) ?: continue
+                    val ts = row.optString(0).toLongOrNull() ?: continue
+                    val o = row.optString(1).toDoubleOrNull() ?: continue
+                    val h = row.optString(2).toDoubleOrNull() ?: continue
+                    val l = row.optString(3).toDoubleOrNull() ?: continue
+                    val c = row.optString(4).toDoubleOrNull() ?: continue
+                    val v = row.optString(6).toDoubleOrNull()?.takeIf { it > 0.0 }
+                        ?: row.optString(5).toDoubleOrNull()
+                        ?: 0.0
+                    val confirmFlag = row.optString(8, "")
+                    val closeTs = ts + effStep
+                    val isClosed = if (confirmFlag == "1") true else if (confirmFlag == "0") false else closeTs <= nowMs
+                    if (isClosed && o > 0.0 && c > 0.0 && h >= l) {
+                        out.add(CandlePoint(ts, o, h, l, c, v, isClosed = true, closeTimestamp = closeTs))
+                    }
+                }
+                out.distinctBy { it.timestamp }.sortedBy { it.timestamp }
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+
         fun redactSensitiveTokens(text: String): String {
             return text
                 .replace(Regex("AIza[0-9A-Za-z_\\-]{18,}"), "[REDACTED_KEY]")
@@ -1607,45 +1675,67 @@ class MarketDataService {
             }
         }
 
-        try {
-            val req = Request.Builder()
-                .url("https://fapi.binance.com/fapi/v1/exchangeInfo")
-                .header("User-Agent", userAgent)
-                .build()
-            client.newCall(req).execute().use { resp ->
-                if (resp.isSuccessful) {
-                    val body = resp.body?.string()
-                    if (!body.isNullOrBlank()) {
-                        val symbolsArr = JSONObject(body).optJSONArray("symbols")
-                        if (symbolsArr != null) {
-                            val activeSet = mutableSetOf<String>()
-                            for (i in 0 until symbolsArr.length()) {
-                                val sObj = symbolsArr.optJSONObject(i) ?: continue
-                                if (sObj.optString("contractType", "") == "PERPETUAL" && sObj.optString("status", "") == "TRADING") {
-                                    activeSet.add(sObj.optString("symbol"))
+        if (now >= fapiGeoBlockedUntilMs.get()) {
+            try {
+                val req = Request.Builder()
+                    .url("https://fapi.binance.com/fapi/v1/exchangeInfo")
+                    .header("User-Agent", userAgent)
+                    .build()
+                client.newCall(req).execute().use { resp ->
+                    if (resp.code == 451 || resp.code == 403) {
+                        fapiGeoBlockedUntilMs.set(now + 10 * 60_000L)
+                    } else if (resp.isSuccessful) {
+                        val body = resp.body?.string()
+                        if (!body.isNullOrBlank()) {
+                            val symbolsArr = JSONObject(body).optJSONArray("symbols")
+                            if (symbolsArr != null) {
+                                val activeSet = mutableSetOf<String>()
+                                for (i in 0 until symbolsArr.length()) {
+                                    val sObj = symbolsArr.optJSONObject(i) ?: continue
+                                    if (sObj.optString("contractType", "") == "PERPETUAL" && sObj.optString("status", "") == "TRADING") {
+                                        activeSet.add(sObj.optString("symbol"))
+                                    }
                                 }
-                            }
-                            if (activeSet.isNotEmpty()) {
-                                fapiPerpSymbolsCache = now to activeSet
-                                return@withContext candidates.any { it in activeSet }
+                                if (activeSet.isNotEmpty()) {
+                                    fapiPerpSymbolsCache = now to activeSet
+                                    return@withContext candidates.any { it in activeSet }
+                                }
                             }
                         }
                     }
                 }
+            } catch (e: Exception) {
+                recordApiError("BinanceFutures", "exchangeInfo probe failed: ${e.message ?: "error"}")
             }
-        } catch (e: Exception) {
-            recordApiError("BinanceFutures", "exchangeInfo probe failed: ${e.message ?: "error"}")
+
+            if (now >= fapiGeoBlockedUntilMs.get()) {
+                // Direct single-symbol fallback probe on fapi
+                for (cand in candidates) {
+                    try {
+                        val req = Request.Builder().url("https://fapi.binance.com/fapi/v1/ticker/price?symbol=$cand").header("User-Agent", userAgent).build()
+                        client.newCall(req).execute().use { resp ->
+                            if (resp.code == 451 || resp.code == 403) {
+                                fapiGeoBlockedUntilMs.set(now + 10 * 60_000L)
+                                return@use
+                            }
+                            if (resp.isSuccessful) return@withContext true
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
         }
 
-        // Direct single-symbol fallback probe on fapi
-        for (cand in candidates) {
-            try {
-                val req = Request.Builder().url("https://fapi.binance.com/fapi/v1/ticker/price?symbol=$cand").header("User-Agent", userAgent).build()
-                client.newCall(req).execute().use { resp ->
-                    if (resp.isSuccessful) return@withContext true
+        // OKX perpetual swap availability probe (globally accessible when fapi.binance.com is geo-blocked)
+        try {
+            val okxInst = "$clean-USDT-SWAP"
+            val req = Request.Builder().url("https://www.okx.com/api/v5/market/ticker?instId=$okxInst").header("User-Agent", userAgent).build()
+            client.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val data = JSONObject(resp.body?.string() ?: "{}").optJSONArray("data")
+                    if (data != null && data.length() > 0) return@withContext true
                 }
-            } catch (_: Exception) {}
-        }
+            }
+        } catch (_: Exception) {}
         false
     }
 
@@ -1821,34 +1911,44 @@ class MarketDataService {
         } else {
             val base = clean.removeSuffix("USDT").removeSuffix("-PERP").removeSuffix("PERP")
             val pair = "${base}USDT"
-            val baseUrl = if (isFutures) "https://fapi.binance.com/fapi/v1" else "https://data-api.binance.vision/api/v3"
-            try {
-                val url = "$baseUrl/klines?symbol=$pair&interval=1d&limit=45"
-                val req = Request.Builder().url(url).header("User-Agent", userAgent).build()
-                client.newCall(req).execute().use { resp ->
-                    if (resp.isSuccessful) {
-                        val body = resp.body?.string() ?: ""
-                        if (body.startsWith("[")) {
-                            val arr = org.json.JSONArray(body)
-                            val out = mutableListOf<CandlePoint>()
-                            for (i in 0 until arr.length()) {
-                                val k = arr.getJSONArray(i)
-                                val ot = k.getLong(0)
-                                val o = k.getString(1).toDoubleOrNull() ?: continue
-                                val h = k.getString(2).toDoubleOrNull() ?: continue
-                                val l = k.getString(3).toDoubleOrNull() ?: continue
-                                val c = k.getString(4).toDoubleOrNull() ?: continue
-                                val v = k.getString(5).toDoubleOrNull() ?: 0.0
-                                val ct = k.optLong(6, ot + 86_399_999L)
-                                if (ct <= now) {
-                                    out.add(CandlePoint(ot, o, h, l, c, v, isClosed = true))
+            val baseUrls = if (isFutures && now >= fapiGeoBlockedUntilMs.get()) {
+                listOf("https://fapi.binance.com/fapi/v1", "https://data-api.binance.vision/api/v3")
+            } else {
+                listOf("https://data-api.binance.vision/api/v3")
+            }
+            for (baseUrl in baseUrls) {
+                try {
+                    val url = "$baseUrl/klines?symbol=$pair&interval=1d&limit=45"
+                    val req = Request.Builder().url(url).header("User-Agent", userAgent).build()
+                    client.newCall(req).execute().use { resp ->
+                        if ((resp.code == 451 || resp.code == 403) && baseUrl.contains("fapi.binance.com")) {
+                            fapiGeoBlockedUntilMs.set(now + 10 * 60_000L)
+                            return@use
+                        }
+                        if (resp.isSuccessful) {
+                            val body = resp.body?.string() ?: ""
+                            if (body.startsWith("[")) {
+                                val arr = org.json.JSONArray(body)
+                                val out = mutableListOf<CandlePoint>()
+                                for (i in 0 until arr.length()) {
+                                    val k = arr.getJSONArray(i)
+                                    val ot = k.getLong(0)
+                                    val o = k.getString(1).toDoubleOrNull() ?: continue
+                                    val h = k.getString(2).toDoubleOrNull() ?: continue
+                                    val l = k.getString(3).toDoubleOrNull() ?: continue
+                                    val c = k.getString(4).toDoubleOrNull() ?: continue
+                                    val v = k.getString(5).toDoubleOrNull() ?: 0.0
+                                    val ct = k.optLong(6, ot + 86_399_999L)
+                                    if (ct <= now) {
+                                        out.add(CandlePoint(ot, o, h, l, c, v, isClosed = true))
+                                    }
                                 }
+                                if (out.isNotEmpty()) return@withContext out
                             }
-                            if (out.isNotEmpty()) return@withContext out
                         }
                     }
-                }
-            } catch (_: Exception) {}
+                } catch (_: Exception) {}
+            }
         }
         emptyList()
     }
@@ -1904,12 +2004,14 @@ class MarketDataService {
             val mexcFuture = async { fetchSingleMexcQuote(usdtPair, isFutures, headerPrice) }
             val coinbaseFuture = async { fetchSingleCoinbaseQuote(cleanBase, isFutures, headerPrice) }
 
-            listOf(
-                binanceFuture.await(),
-                bybitFuture.await(),
-                okxFuture.await(),
-                mexcFuture.await(),
-                coinbaseFuture.await()
+            sortExchangeQuotesLiveFirst(
+                listOf(
+                    binanceFuture.await(),
+                    bybitFuture.await(),
+                    okxFuture.await(),
+                    mexcFuture.await(),
+                    coinbaseFuture.await()
+                )
             )
         }
     }
@@ -1943,7 +2045,7 @@ class MarketDataService {
             askPrice = ask,
             fetchedAtMs = now,
             isStale = isStale,
-            unavailableReason = if (price <= 0.0) "Unavailable - Invalid price" else null
+            unavailableReason = if (price <= 0.0) "Invalid price" else null
         )
     }
 
@@ -1957,17 +2059,23 @@ class MarketDataService {
             latencyMs = 0L,
             fetchedAtMs = System.currentTimeMillis(),
             isStale = false,
-            unavailableReason = "Unavailable - $reason"
+            unavailableReason = cleanUnavailableReason(reason)
         )
     }
 
     private fun fetchSingleBinanceQuote(pair: String, isFutures: Boolean, headerPrice: Double): ExchangePriceQuote {
         val start = System.currentTimeMillis()
+        if (isFutures && start < fapiGeoBlockedUntilMs.get()) {
+            return unavailableQuote(CryptoExchange.BINANCE, "Geo-blocked (HTTP 451)")
+        }
         val baseUrl = if (isFutures) "https://fapi.binance.com/fapi/v1" else "https://data-api.binance.vision/api/v3"
         return try {
             val tickerUrl = "$baseUrl/ticker/24hr?symbol=$pair"
             val req = Request.Builder().url(tickerUrl).header("User-Agent", userAgent).build()
             client.newCall(req).execute().use { resp ->
+                if (isFutures && (resp.code == 451 || resp.code == 403)) {
+                    fapiGeoBlockedUntilMs.set(System.currentTimeMillis() + 10 * 60_000L)
+                }
                 if (!resp.isSuccessful) return unavailableQuote(CryptoExchange.BINANCE, "HTTP ${resp.code}")
                 val json = org.json.JSONObject(resp.body?.string() ?: "{}")
                 val last = json.optString("lastPrice").toDoubleOrNull() ?: return unavailableQuote(CryptoExchange.BINANCE, "Symbol not listed")
@@ -2096,6 +2204,9 @@ class MarketDataService {
 
     private suspend fun executeBinanceGetWithBackoff(url: String): String? = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
+        if (url.contains("fapi.binance.com") && now < fapiGeoBlockedUntilMs.get()) {
+            return@withContext null
+        }
         if (now < binanceCooldownUntilMs.get()) {
             return@withContext null
         }
@@ -2113,6 +2224,12 @@ class MarketDataService {
                     recordBinanceWeightHeader(resp)
                     if (resp.isSuccessful) {
                         return@withContext resp.body?.string()
+                    }
+                    if (resp.code == 451 || resp.code == 403) {
+                        if (url.contains("fapi.binance.com")) {
+                            fapiGeoBlockedUntilMs.set(System.currentTimeMillis() + 10 * 60_000L)
+                        }
+                        return@withContext null
                     }
                     if (resp.code == 429 || resp.code == 418) {
                         val retrySec = resp.header("Retry-After")?.toLongOrNull() ?: (backoffMs / 1000L).coerceAtLeast(1L)
@@ -2139,8 +2256,63 @@ class MarketDataService {
     }
 
     /**
-     * Fetches closed Binance klines incrementally. When [startTimeMs] > 0, fetches ONLY bars
-     * opening/closing after [startTimeMs] to minimize bandwidth and weight.
+     * Fetches closed candles from OKX (Swap for futures, Spot otherwise) as a globally unblocked venue.
+     */
+    suspend fun fetchOkxKlinesIncremental(
+        cleanBaseSymbol: String,
+        timeframe: Timeframe,
+        startTimeMs: Long? = null,
+        isFutures: Boolean = false,
+        limit: Int = 300
+    ): List<CandlePoint> = withContext(Dispatchers.IO) {
+        val instId = if (isFutures) "$cleanBaseSymbol-USDT-SWAP" else "$cleanBaseSymbol-USDT"
+        val bar = toOkxBarInterval(timeframe)
+        val collected = linkedMapOf<Long, CandlePoint>()
+        try {
+            val req1 = Request.Builder()
+                .url("https://www.okx.com/api/v5/market/candles?instId=$instId&bar=$bar&limit=300")
+                .header("User-Agent", userAgent)
+                .build()
+            client.newCall(req1).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string()
+                    if (!body.isNullOrBlank()) {
+                        parseOkxCandlesJson(body, timeframe).forEach { collected[it.timestamp] = it }
+                    }
+                }
+            }
+            // Paginate older bars via history-candles if we need >= 300 bars and weren't asked for a tiny incremental tail
+            val maxPages = if (startTimeMs == null && limit > 300) 2 else 0
+            repeat(maxPages) {
+                val oldestTs = collected.keys.minOrNull() ?: return@repeat
+                if (startTimeMs != null && oldestTs <= startTimeMs) return@repeat
+                val histReq = Request.Builder()
+                    .url("https://www.okx.com/api/v5/market/history-candles?instId=$instId&bar=$bar&after=$oldestTs&limit=300")
+                    .header("User-Agent", userAgent)
+                    .build()
+                client.newCall(histReq).execute().use { resp ->
+                    if (!resp.isSuccessful) return@repeat
+                    val body = resp.body?.string() ?: return@repeat
+                    val batch = parseOkxCandlesJson(body, timeframe)
+                    if (batch.isEmpty()) return@repeat
+                    batch.forEach { collected[it.timestamp] = it }
+                }
+            }
+        } catch (e: Exception) {
+            recordApiError("OKX", "Klines failed for $instId: ${e.message ?: "error"}")
+        }
+        val allSorted = collected.values.sortedBy { it.timestamp }
+        val filtered = if (startTimeMs != null && startTimeMs > 0L) {
+            allSorted.filter { it.timestamp >= startTimeMs || it.effectiveCloseTimestamp(timeframe.stepMillis) > startTimeMs }
+        } else {
+            allSorted
+        }
+        filtered.takeLast(limit.coerceIn(10, 1000))
+    }
+
+    /**
+     * Fetches closed crypto klines incrementally across Binance Futures -> OKX Swap -> Binance Vision Spot mirror.
+     * When [startTimeMs] > 0, fetches ONLY bars opening/closing after [startTimeMs] to minimize bandwidth and weight.
      */
     suspend fun fetchBinanceKlinesIncremental(
         symbol: String,
@@ -2152,7 +2324,6 @@ class MarketDataService {
         val clean = symbol.trim().uppercase(Locale.US)
             .removeSuffix("USDT").removeSuffix("USDC").removeSuffix("BUSDT").removeSuffix("-PERP").removeSuffix("PERP")
         val candidates = if (clean.endsWith("USDT") || clean.endsWith("USDC")) listOf(clean) else listOf("${clean}USDT", "${clean}USDC", "1000${clean}USDT")
-        val baseUrl = if (isFutures) "https://fapi.binance.com/fapi/v1" else "https://data-api.binance.vision/api/v3"
         val interval = when (timeframe) {
             Timeframe.FIVE_DAYS -> "1w"
             else -> timeframe.binanceInterval
@@ -2161,35 +2332,51 @@ class MarketDataService {
         val startParam = if (startTimeMs != null && startTimeMs > 0L) "&startTime=$startTimeMs" else ""
         val now = System.currentTimeMillis()
 
-        for (pair in candidates) {
-            val url = "$baseUrl/klines?symbol=$pair&interval=$interval&limit=$clampedLimit$startParam"
-            val body = executeBinanceGetWithBackoff(url) ?: continue
-            if (!body.startsWith("[")) continue
-            val arr = org.json.JSONArray(body)
-            val out = mutableListOf<CandlePoint>()
-            for (i in 0 until arr.length()) {
-                val k = arr.optJSONArray(i) ?: continue
-                val ot = k.optLong(0, 0L)
-                val o = k.optString(1).toDoubleOrNull() ?: continue
-                val h = k.optString(2).toDoubleOrNull() ?: continue
-                val l = k.optString(3).toDoubleOrNull() ?: continue
-                val c = k.optString(4).toDoubleOrNull() ?: continue
-                val v = k.optString(5).toDoubleOrNull() ?: 0.0
-                val ct = k.optLong(6, ot + timeframe.stepMillis - 1L)
-                val closed = ct <= now
-                if (closed && o > 0.0 && h >= l && c > 0.0) {
-                    out.add(CandlePoint(ot, o, h, l, c, v, isClosed = true, closeTimestamp = ct + 1L))
+        suspend fun queryBinanceBase(baseUrl: String): List<CandlePoint>? {
+            for (pair in candidates) {
+                val url = "$baseUrl/klines?symbol=$pair&interval=$interval&limit=$clampedLimit$startParam"
+                val body = executeBinanceGetWithBackoff(url) ?: continue
+                if (!body.startsWith("[")) continue
+                val arr = org.json.JSONArray(body)
+                val out = mutableListOf<CandlePoint>()
+                for (i in 0 until arr.length()) {
+                    val k = arr.optJSONArray(i) ?: continue
+                    val ot = k.optLong(0, 0L)
+                    val o = k.optString(1).toDoubleOrNull() ?: continue
+                    val h = k.optString(2).toDoubleOrNull() ?: continue
+                    val l = k.optString(3).toDoubleOrNull() ?: continue
+                    val c = k.optString(4).toDoubleOrNull() ?: continue
+                    val v = k.optString(5).toDoubleOrNull() ?: 0.0
+                    val ct = k.optLong(6, ot + timeframe.stepMillis - 1L)
+                    val closed = ct <= now
+                    if (closed && o > 0.0 && h >= l && c > 0.0) {
+                        out.add(CandlePoint(ot, o, h, l, c, v, isClosed = true, closeTimestamp = ct + 1L))
+                    }
+                }
+                if (out.isNotEmpty() || startTimeMs != null) {
+                    return out.sortedBy { it.timestamp }
                 }
             }
-            if (out.isNotEmpty() || startTimeMs != null) {
-                return@withContext out.sortedBy { it.timestamp }
-            }
+            return null
+        }
+
+        if (isFutures) {
+            queryBinanceBase("https://fapi.binance.com/fapi/v1")?.let { return@withContext it }
+            // Fallback 1: OKX Perpetual Swap (globally unblocked)
+            val okxBars = fetchOkxKlinesIncremental(clean, timeframe, startTimeMs, isFutures = true, limit = clampedLimit)
+            if (okxBars.isNotEmpty()) return@withContext okxBars
+            // Fallback 2: Binance Vision Spot mirror (1,000 bars, zero geo-block)
+            queryBinanceBase("https://data-api.binance.vision/api/v3")?.let { return@withContext it }
+        } else {
+            queryBinanceBase("https://data-api.binance.vision/api/v3")?.let { return@withContext it }
+            val okxBars = fetchOkxKlinesIncremental(clean, timeframe, startTimeMs, isFutures = false, limit = clampedLimit)
+            if (okxBars.isNotEmpty()) return@withContext okxBars
         }
         emptyList()
     }
 
     /**
-     * Fetches real Depth-of-Market snapshot (top bids/asks) from Binance Spot or USDS-M Futures.
+     * Fetches real Depth-of-Market snapshot (top bids/asks) from Binance Spot/Futures with OKX & Vision fallback.
      * Returns null when unavailable (stocks or unreachable feed) — never fabricates depth.
      */
     suspend fun fetchBinanceOrderBookSnapshot(
@@ -2202,35 +2389,118 @@ class MarketDataService {
         val pair = "${clean}USDT"
         val baseUrl = if (isFutures) "https://fapi.binance.com/fapi/v1" else "https://data-api.binance.vision/api/v3"
         val url = "$baseUrl/depth?symbol=$pair&limit=${depth.coerceIn(5, 100)}"
-        val body = executeBinanceGetWithBackoff(url) ?: return@withContext null
-        return@withContext try {
-            val root = JSONObject(body)
-            val bidsArr = root.optJSONArray("bids") ?: return@withContext null
-            val asksArr = root.optJSONArray("asks") ?: return@withContext null
-            val bids = mutableListOf<com.example.domain.model.OrderBookLevel>()
-            val asks = mutableListOf<com.example.domain.model.OrderBookLevel>()
-            for (i in 0 until bidsArr.length()) {
-                val lvl = bidsArr.optJSONArray(i) ?: continue
-                val p = lvl.optString(0).toDoubleOrNull() ?: continue
-                val q = lvl.optString(1).toDoubleOrNull() ?: continue
-                if (p > 0.0 && q > 0.0) bids.add(com.example.domain.model.OrderBookLevel(p, q, p * q))
-            }
-            for (i in 0 until asksArr.length()) {
-                val lvl = asksArr.optJSONArray(i) ?: continue
-                val p = lvl.optString(0).toDoubleOrNull() ?: continue
-                val q = lvl.optString(1).toDoubleOrNull() ?: continue
-                if (p > 0.0 && q > 0.0) asks.add(com.example.domain.model.OrderBookLevel(p, q, p * q))
-            }
-            if (bids.isEmpty() || asks.isEmpty()) null
-            else com.example.domain.model.OrderBookSnapshot(
-                bids = bids,
-                asks = asks,
-                lastUpdateId = root.optLong("lastUpdateId", 0L),
-                timestamp = System.currentTimeMillis()
-            )
-        } catch (_: Exception) {
-            null
+        val body = executeBinanceGetWithBackoff(url)
+        if (body != null) {
+            try {
+                val root = JSONObject(body)
+                val bidsArr = root.optJSONArray("bids")
+                val asksArr = root.optJSONArray("asks")
+                if (bidsArr != null && asksArr != null) {
+                    val bids = mutableListOf<com.example.domain.model.OrderBookLevel>()
+                    val asks = mutableListOf<com.example.domain.model.OrderBookLevel>()
+                    for (i in 0 until bidsArr.length()) {
+                        val lvl = bidsArr.optJSONArray(i) ?: continue
+                        val p = lvl.optString(0).toDoubleOrNull() ?: continue
+                        val q = lvl.optString(1).toDoubleOrNull() ?: continue
+                        if (p > 0.0 && q > 0.0) bids.add(com.example.domain.model.OrderBookLevel(p, q, p * q))
+                    }
+                    for (i in 0 until asksArr.length()) {
+                        val lvl = asksArr.optJSONArray(i) ?: continue
+                        val p = lvl.optString(0).toDoubleOrNull() ?: continue
+                        val q = lvl.optString(1).toDoubleOrNull() ?: continue
+                        if (p > 0.0 && q > 0.0) asks.add(com.example.domain.model.OrderBookLevel(p, q, p * q))
+                    }
+                    if (bids.isNotEmpty() && asks.isNotEmpty()) {
+                        return@withContext com.example.domain.model.OrderBookSnapshot(
+                            bids = bids,
+                            asks = asks,
+                            lastUpdateId = root.optLong("lastUpdateId", 0L),
+                            timestamp = System.currentTimeMillis()
+                        )
+                    }
+                }
+            } catch (_: Exception) {}
         }
+
+        // OKX Depth fallback (works globally even when fapi.binance.com is 451 geo-blocked)
+        try {
+            val instId = if (isFutures) "$clean-USDT-SWAP" else "$clean-USDT"
+            val req = Request.Builder()
+                .url("https://www.okx.com/api/v5/market/books?instId=$instId&sz=${depth.coerceIn(5, 50)}")
+                .header("User-Agent", userAgent)
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val bookObj = JSONObject(resp.body?.string() ?: "{}").optJSONArray("data")?.optJSONObject(0)
+                    if (bookObj != null) {
+                        val bidsArr = bookObj.optJSONArray("bids")
+                        val asksArr = bookObj.optJSONArray("asks")
+                        val bids = mutableListOf<com.example.domain.model.OrderBookLevel>()
+                        val asks = mutableListOf<com.example.domain.model.OrderBookLevel>()
+                        if (bidsArr != null) {
+                            for (i in 0 until bidsArr.length()) {
+                                val lvl = bidsArr.optJSONArray(i) ?: continue
+                                val p = lvl.optString(0).toDoubleOrNull() ?: continue
+                                val q = lvl.optString(1).toDoubleOrNull() ?: continue
+                                if (p > 0.0 && q > 0.0) bids.add(com.example.domain.model.OrderBookLevel(p, q, p * q))
+                            }
+                        }
+                        if (asksArr != null) {
+                            for (i in 0 until asksArr.length()) {
+                                val lvl = asksArr.optJSONArray(i) ?: continue
+                                val p = lvl.optString(0).toDoubleOrNull() ?: continue
+                                val q = lvl.optString(1).toDoubleOrNull() ?: continue
+                                if (p > 0.0 && q > 0.0) asks.add(com.example.domain.model.OrderBookLevel(p, q, p * q))
+                            }
+                        }
+                        if (bids.isNotEmpty() && asks.isNotEmpty()) {
+                            return@withContext com.example.domain.model.OrderBookSnapshot(
+                                bids = bids,
+                                asks = asks,
+                                lastUpdateId = bookObj.optString("ts").toLongOrNull() ?: 0L,
+                                timestamp = System.currentTimeMillis()
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+
+        // Final fallback for futures: Binance Vision Spot order book
+        if (isFutures) {
+            val spotBody = executeBinanceGetWithBackoff("https://data-api.binance.vision/api/v3/depth?symbol=$pair&limit=${depth.coerceIn(5, 100)}")
+            if (spotBody != null) {
+                return@withContext try {
+                    val root = JSONObject(spotBody)
+                    val bidsArr = root.optJSONArray("bids") ?: return@withContext null
+                    val asksArr = root.optJSONArray("asks") ?: return@withContext null
+                    val bids = mutableListOf<com.example.domain.model.OrderBookLevel>()
+                    val asks = mutableListOf<com.example.domain.model.OrderBookLevel>()
+                    for (i in 0 until bidsArr.length()) {
+                        val lvl = bidsArr.optJSONArray(i) ?: continue
+                        val p = lvl.optString(0).toDoubleOrNull() ?: continue
+                        val q = lvl.optString(1).toDoubleOrNull() ?: continue
+                        if (p > 0.0 && q > 0.0) bids.add(com.example.domain.model.OrderBookLevel(p, q, p * q))
+                    }
+                    for (i in 0 until asksArr.length()) {
+                        val lvl = asksArr.optJSONArray(i) ?: continue
+                        val p = lvl.optString(0).toDoubleOrNull() ?: continue
+                        val q = lvl.optString(1).toDoubleOrNull() ?: continue
+                        if (p > 0.0 && q > 0.0) asks.add(com.example.domain.model.OrderBookLevel(p, q, p * q))
+                    }
+                    if (bids.isEmpty() || asks.isEmpty()) null
+                    else com.example.domain.model.OrderBookSnapshot(
+                        bids = bids,
+                        asks = asks,
+                        lastUpdateId = root.optLong("lastUpdateId", 0L),
+                        timestamp = System.currentTimeMillis()
+                    )
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        }
+        null
     }
 
     /**
@@ -2245,7 +2515,9 @@ class MarketDataService {
             "${c}USDT"
         }
         val baseUrl = if (isFutures) "https://fapi.binance.com/fapi/v1" else "https://data-api.binance.vision/api/v3"
-        val body = executeBinanceGetWithBackoff("$baseUrl/ticker/24hr") ?: return@withContext emptyMap()
+        val body = (executeBinanceGetWithBackoff("$baseUrl/ticker/24hr")
+            ?: if (isFutures) executeBinanceGetWithBackoff("https://data-api.binance.vision/api/v3/ticker/24hr") else null)
+            ?: return@withContext emptyMap()
         if (!body.startsWith("[")) return@withContext emptyMap()
         val out = linkedMapOf<String, Pair<Double, Double>>()
         val arr = org.json.JSONArray(body)

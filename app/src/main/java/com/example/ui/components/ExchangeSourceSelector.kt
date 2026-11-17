@@ -30,8 +30,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.api.MarketDataService
 import com.example.domain.model.CryptoExchange
 import com.example.domain.model.ExchangePriceQuote
 import com.example.domain.util.PriceFormatter
@@ -117,6 +119,11 @@ fun ExchangeSourceSelector(
 
         Spacer(modifier = Modifier.height(10.dp))
 
+        val orderedExchanges = CryptoExchange.values().sortedBy { ex ->
+            val q = exchangeQuotes.find { it.exchange == ex }
+            if (q != null && q.unavailableReason == null && q.price > 0.0) 0 else 1
+        }
+
         // Horizontal scroll list of exchanges
         Row(
             modifier = Modifier
@@ -124,7 +131,7 @@ fun ExchangeSourceSelector(
                 .horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            CryptoExchange.values().forEach { exchange ->
+            orderedExchanges.forEach { exchange ->
                 val isSelected = exchange == selectedExchange
                 val quote = exchangeQuotes.find { it.exchange == exchange }
                 val price = quote?.price ?: 0.0
@@ -137,7 +144,7 @@ fun ExchangeSourceSelector(
 
                 Box(
                     modifier = Modifier
-                        .widthIn(min = 148.dp)
+                        .width(156.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(if (isSelected) Color(exchange.colorHex).copy(alpha = 0.18f) else DarkSurfaceElevated)
                         .border(
@@ -153,7 +160,7 @@ fun ExchangeSourceSelector(
                         .padding(horizontal = 10.dp, vertical = 8.dp)
                         .testTag("exchange_tab_${exchange.id}")
                 ) {
-                    Column {
+                    Column(modifier = Modifier.fillMaxWidth()) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(5.dp)
@@ -170,7 +177,9 @@ fun ExchangeSourceSelector(
                                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
                                 color = if (isSelected) Color(exchange.colorHex) else TextPrimary,
                                 maxLines = 1,
-                                softWrap = false
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
                             )
                             if (isStale) {
                                 Box(
@@ -186,12 +195,15 @@ fun ExchangeSourceSelector(
 
                         Spacer(modifier = Modifier.height(3.dp))
                         if (isUnavailable) {
+                            val cleanReason = MarketDataService.cleanUnavailableReason(quote?.unavailableReason)
                             Text(
-                                text = "Unavailable - ${quote?.unavailableReason ?: "no quote"}",
+                                text = "Unavailable • $cleanReason",
                                 fontSize = 9.sp,
                                 color = BearishRed,
                                 fontWeight = FontWeight.SemiBold,
-                                maxLines = 2
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                lineHeight = 12.sp
                             )
                         } else {
                             Text(
@@ -200,16 +212,18 @@ fun ExchangeSourceSelector(
                                 fontWeight = FontWeight.Bold,
                                 color = TextPrimary,
                                 maxLines = 1,
-                                softWrap = false
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
                             )
-                            val spreadStr = if (spread > 0.0) PriceFormatter.formatPercent(spread, decimals = 3, signed = false) else "-"
+                            val spreadStr = if (spread > 0.0 && !spread.isNaN()) PriceFormatter.formatPercent(spread, decimals = 3, signed = false) else "-"
                             val ageStr = if (ageSec != null) "${ageSec}s ago" else "-"
                             Text(
                                 text = "Spread: $spreadStr • $ageStr",
                                 fontSize = 9.sp,
                                 color = if (isStale) RiskAmber else TechCyan,
                                 maxLines = 1,
-                                softWrap = false
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }

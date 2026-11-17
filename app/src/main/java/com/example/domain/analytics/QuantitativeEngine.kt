@@ -10,7 +10,7 @@ import kotlin.math.sqrt
 
 object QuantitativeEngine {
 
-    fun computeIndicators(candles: List<CandlePoint>): TechnicalIndicators {
+    fun computeIndicators(candles: List<CandlePoint>, includeSmc: Boolean = true): TechnicalIndicators {
         if (candles.isEmpty()) {
             return TechnicalIndicators(
                 rsi14 = 50.0,
@@ -66,7 +66,7 @@ object QuantitativeEngine {
         val avgVol = if (recentVols.isNotEmpty()) recentVols.average() else 1.0
         val volRatio = if (avgVol > 0) volumes.last() / avgVol else 1.0
 
-        val smcStructure = computeSmartMoneyStructure(candles, atr)
+        val smcStructure = if (includeSmc) computeSmartMoneyStructure(candles, atr) else null
 
         return TechnicalIndicators(
             rsi14 = rsi14,
@@ -114,7 +114,25 @@ object QuantitativeEngine {
         val effectiveAtr = atrParam ?: calculateATR(candles, 14)
         val minFvgSize = (effectiveAtr * 0.30).coerceAtLeast(0.000001)
 
-        val currentPrice = candles.last().close
+        val n = candles.size
+        val workStart = (n - 300).coerceAtLeast(0)
+        val workCandles = if (workStart > 0) candles.subList(workStart, n) else candles
+        val wSize = workCandles.size
+
+        // Precompute suffix min low and max high in O(N) for O(1) mitigation checks
+        val suffixMinLow = DoubleArray(wSize)
+        val suffixMaxHigh = DoubleArray(wSize)
+        var runMin = Double.POSITIVE_INFINITY
+        var runMax = Double.NEGATIVE_INFINITY
+        for (k in wSize - 1 downTo 0) {
+            val wc = workCandles[k]
+            if (wc.low < runMin) runMin = wc.low
+            if (wc.high > runMax) runMax = wc.high
+            suffixMinLow[k] = runMin
+            suffixMaxHigh[k] = runMax
+        }
+
+        val currentPrice = workCandles.last().close
         val fvgs = mutableListOf<com.example.domain.model.FairValueGap>()
         val orderBlocks = mutableListOf<com.example.domain.model.OrderBlock>()
         val liquidityPools = mutableListOf<com.example.domain.model.LiquidityPool>()
@@ -123,10 +141,10 @@ object QuantitativeEngine {
         val tick = PriceFormatter.inferTickSize(currentPrice)
 
         // 1. Detect 3-Candle Fair Value Gaps (FVG) >= 0.3 * ATR
-        for (i in 2 until candles.size) {
-            val c1 = candles[i - 2]
-            val c2 = candles[i - 1]
-            val c3 = candles[i]
+        for (i in 2 until wSize) {
+            val c1 = workCandles[i - 2]
+            val c2 = workCandles[i - 1]
+            val c3 = workCandles[i]
 
             // Bullish FVG (BISI): c1.high < c3.low
             if (c3.low > c1.high && c2.close > c2.open && c1.high > 0.0 && c3.low > 0.0) {
@@ -134,18 +152,20 @@ object QuantitativeEngine {
                 val gapTop = c3.low
                 val gapSize = gapTop - gapBottom
                 if (gapSize >= minFvgSize) {
-                    val isMitigated = candles.subList(i + 1, candles.size).any { it.low <= gapBottom }
-                    fvgs.add(
-                        com.example.domain.model.FairValueGap(
-                            type = com.example.domain.model.FvgType.BULLISH_IMBALANCE,
-                            top = gapTop,
-                            bottom = gapBottom,
-                            midPrice = (gapTop + gapBottom) / 2.0,
-                            isMitigated = isMitigated,
-                            candleIndex = i - 1,
-                            description = "Bullish Imbalance ${PriceFormatter.formatZoneRange(gapBottom, gapTop, tick)}"
+                    val isMitigated = i + 1 < wSize && suffixMinLow[i + 1] <= gapBottom
+                    if (!isMitigated) {
+                        fvgs.add(
+                            com.example.domain.model.FairValueGap(
+                                type = com.example.domain.model.FvgType.BULLISH_IMBALANCE,
+                                top = gapTop,
+                                bottom = gapBottom,
+                                midPrice = (gapTop + gapBottom) / 2.0,
+                                isMitigated = false,
+                                candleIndex = workStart + i - 1,
+                                description = "Bullish Imbalance ${PriceFormatter.formatZoneRange(gapBottom, gapTop, tick)}"
+                            )
                         )
-                    )
+                    }
                 }
             }
 
@@ -155,76 +175,91 @@ object QuantitativeEngine {
                 val gapBottom = c3.high
                 val gapSize = gapTop - gapBottom
                 if (gapSize >= minFvgSize) {
-                    val isMitigated = candles.subList(i + 1, candles.size).any { it.high >= gapTop }
-                    fvgs.add(
-                        com.example.domain.model.FairValueGap(
-                            type = com.example.domain.model.FvgType.BEARISH_IMBALANCE,
-                            top = gapTop,
-                            bottom = gapBottom,
-                            midPrice = (gapTop + gapBottom) / 2.0,
-                            isMitigated = isMitigated,
-                            candleIndex = i - 1,
-                            description = "Bearish Imbalance ${PriceFormatter.formatZoneRange(gapBottom, gapTop, tick)}"
+                    val isMitigated = i + 1 < wSize && suffixMaxHigh[i + 1] >= gapTop
+                    if (!isMitigated) {
+                        fvgs.add(
+                            com.example.domain.model.FairValueGap(
+                                type = com.example.domain.model.FvgType.BEARISH_IMBALANCE,
+                                top = gapTop,
+                                bottom = gapBottom,
+                                midPrice = (gapTop + gapBottom) / 2.0,
+                                isMitigated = false,
+                                candleIndex = workStart + i - 1,
+                                description = "Bearish Imbalance ${PriceFormatter.formatZoneRange(gapBottom, gapTop, tick)}"
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        // 2. Detect Institutional Order Blocks (OB)
+        val avgVol = workCandles.sumOf { it.volume } / wSize.coerceAtLeast(1)
+        for (i in 1 until wSize - 2) {
+            val candle = workCandles[i]
+            if (candle.low <= 0.0 || candle.high <= 0.0) continue
+            val obBottom = minOf(candle.low, candle.high)
+            val obTop = maxOf(candle.low, candle.high)
+            val next1 = workCandles[i + 1]
+            val next2 = workCandles[i + 2]
+
+            // Bullish Order Block (OB+): Down-close candle before impulsive upside displacement
+            if (candle.close < candle.open && next1.close > next1.open && (next1.volume > avgVol * 1.1 || next2.close > candle.high)) {
+                val isMitigated = suffixMinLow[i + 1] < obBottom
+                if (!isMitigated) {
+                    orderBlocks.add(
+                        com.example.domain.model.OrderBlock(
+                            type = com.example.domain.model.OrderBlockType.BULLISH_DEMAND_BLOCK,
+                            top = obTop,
+                            bottom = obBottom,
+                            volume = candle.volume,
+                            isMitigated = false,
+                            candleIndex = workStart + i,
+                            description = "Institutional Demand Block ${PriceFormatter.formatZoneRange(obBottom, obTop, tick)}"
+                        )
+                    )
+                }
+            }
+
+            // Bearish Order Block (OB-): Up-close candle before impulsive downside displacement
+            if (candle.close > candle.open && next1.close < next1.open && (next1.volume > avgVol * 1.1 || next2.close < candle.low)) {
+                val isMitigated = suffixMaxHigh[i + 1] > obTop
+                if (!isMitigated) {
+                    orderBlocks.add(
+                        com.example.domain.model.OrderBlock(
+                            type = com.example.domain.model.OrderBlockType.BEARISH_SUPPLY_BLOCK,
+                            top = obTop,
+                            bottom = obBottom,
+                            volume = candle.volume,
+                            isMitigated = false,
+                            candleIndex = workStart + i,
+                            description = "Institutional Supply Block ${PriceFormatter.formatZoneRange(obBottom, obTop, tick)}"
                         )
                     )
                 }
             }
         }
 
-        // 2. Detect Institutional Order Blocks (OB)
-        val avgVol = candles.map { it.volume }.average()
-        for (i in 1 until candles.size - 2) {
-            val candle = candles[i]
-            if (candle.low <= 0.0 || candle.high <= 0.0) continue
-            val obBottom = minOf(candle.low, candle.high)
-            val obTop = maxOf(candle.low, candle.high)
-            val next1 = candles[i + 1]
-            val next2 = candles[i + 2]
-
-            // Bullish Order Block (OB+): Down-close candle before impulsive upside displacement
-            if (candle.close < candle.open && next1.close > next1.open && (next1.volume > avgVol * 1.1 || next2.close > candle.high)) {
-                val isMitigated = candles.subList(i + 1, candles.size).any { it.low < obBottom }
-                orderBlocks.add(
-                    com.example.domain.model.OrderBlock(
-                        type = com.example.domain.model.OrderBlockType.BULLISH_DEMAND_BLOCK,
-                        top = obTop,
-                        bottom = obBottom,
-                        volume = candle.volume,
-                        isMitigated = isMitigated,
-                        candleIndex = i,
-                        description = "Institutional Demand Block ${PriceFormatter.formatZoneRange(obBottom, obTop, tick)}"
-                    )
-                )
-            }
-
-            // Bearish Order Block (OB-): Up-close candle before impulsive downside displacement
-            if (candle.close > candle.open && next1.close < next1.open && (next1.volume > avgVol * 1.1 || next2.close < candle.low)) {
-                val isMitigated = candles.subList(i + 1, candles.size).any { it.high > obTop }
-                orderBlocks.add(
-                    com.example.domain.model.OrderBlock(
-                        type = com.example.domain.model.OrderBlockType.BEARISH_SUPPLY_BLOCK,
-                        top = obTop,
-                        bottom = obBottom,
-                        volume = candle.volume,
-                        isMitigated = isMitigated,
-                        candleIndex = i,
-                        description = "Institutional Supply Block ${PriceFormatter.formatZoneRange(obBottom, obTop, tick)}"
-                    )
-                )
-            }
-        }
-
         // 3. Detect Swing Points & Liquidity Pools (BSL / SSL) + Sweeps
-        for (i in 2 until candles.size - 2) {
-            val c = candles[i]
-            val isSwingHigh = c.high > candles[i - 1].high && c.high > candles[i - 2].high &&
-                              c.high > candles[i + 1].high && c.high > candles[i + 2].high
+        for (i in 2 until wSize - 2) {
+            val c = workCandles[i]
+            val isSwingHigh = c.high > workCandles[i - 1].high && c.high > workCandles[i - 2].high &&
+                              c.high > workCandles[i + 1].high && c.high > workCandles[i + 2].high
 
-            val isSwingLow = c.low < candles[i - 1].low && c.low < candles[i - 2].low &&
-                             c.low < candles[i + 1].low && c.low < candles[i + 2].low
+            val isSwingLow = c.low < workCandles[i - 1].low && c.low < workCandles[i - 2].low &&
+                             c.low < workCandles[i + 1].low && c.low < workCandles[i + 2].low
 
             if (isSwingHigh && c.high > currentPrice) {
-                val sweep = candles.subList(i + 1, candles.size).any { it.high > c.high && it.close < c.high }
+                var sweep = false
+                if (suffixMaxHigh[i + 1] > c.high) {
+                    for (j in i + 1 until wSize) {
+                        val later = workCandles[j]
+                        if (later.high > c.high && later.close < c.high) {
+                            sweep = true
+                            break
+                        }
+                    }
+                }
                 val pool = com.example.domain.model.LiquidityPool(
                     type = com.example.domain.model.LiquidityType.BUY_SIDE_LIQUIDITY_BSL,
                     priceLevel = c.high,
@@ -236,7 +271,16 @@ object QuantitativeEngine {
             }
 
             if (isSwingLow && c.low > 0.0 && c.low < currentPrice) {
-                val sweep = candles.subList(i + 1, candles.size).any { it.low < c.low && it.close > c.low }
+                var sweep = false
+                if (suffixMinLow[i + 1] < c.low) {
+                    for (j in i + 1 until wSize) {
+                        val later = workCandles[j]
+                        if (later.low < c.low && later.close > c.low) {
+                            sweep = true
+                            break
+                        }
+                    }
+                }
                 val pool = com.example.domain.model.LiquidityPool(
                     type = com.example.domain.model.LiquidityType.SELL_SIDE_LIQUIDITY_SSL,
                     priceLevel = c.low,

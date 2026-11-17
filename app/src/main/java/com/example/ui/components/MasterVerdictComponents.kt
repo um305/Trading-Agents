@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -312,11 +314,12 @@ fun MasterVerdictCard(
         if (selectedHorizon != TradingHorizon.OUTLOOK && activePlan != null) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 OutlinedButton(
                     onClick = { onArmAlert(selectedHorizon) },
                     shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
                     modifier = Modifier
                         .weight(1f)
                         .heightIn(min = 48.dp)
@@ -326,15 +329,16 @@ fun MasterVerdictCard(
                         imageVector = if (isArmedForSelectedHorizon) Icons.Default.CheckCircle else Icons.Default.NotificationsActive,
                         contentDescription = "Arm Alert",
                         tint = if (isArmedForSelectedHorizon) BullishGreen else RiskAmber,
-                        modifier = Modifier.size(15.dp)
+                        modifier = Modifier.size(14.dp)
                     )
-                    Spacer(modifier = Modifier.width(4.dp))
+                    Spacer(modifier = Modifier.width(3.dp))
                     Text(
                         text = if (isArmedForSelectedHorizon) "Armed" else "Arm Alert",
                         color = if (isArmedForSelectedHorizon) BullishGreen else RiskAmber,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        maxLines = 1
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
@@ -342,8 +346,9 @@ fun MasterVerdictCard(
                     onClick = { onPaperFollow(selectedHorizon) },
                     enabled = activePlan.state != SignalVerdictState.NO_TRADE && (activePlan.limitPrice ?: 0.0) > 0.0,
                     shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
                     modifier = Modifier
-                        .weight(1f)
+                        .weight(1.1f)
                         .heightIn(min = 48.dp)
                         .testTag("btn_master_paper_follow")
                 ) {
@@ -351,15 +356,16 @@ fun MasterVerdictCard(
                         imageVector = Icons.Default.AddTask,
                         contentDescription = "Paper Follow",
                         tint = BullishGreen,
-                        modifier = Modifier.size(15.dp)
+                        modifier = Modifier.size(14.dp)
                     )
-                    Spacer(modifier = Modifier.width(4.dp))
+                    Spacer(modifier = Modifier.width(3.dp))
                     Text(
                         text = "Paper Follow",
                         color = BullishGreen,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        maxLines = 1
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
@@ -369,8 +375,9 @@ fun MasterVerdictCard(
                         onShareFeedback(if (ok) "Sharing ${verdict.symbol} Master Verdict card" else "Unable to share image")
                     },
                     shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
                     modifier = Modifier
-                        .weight(0.85f)
+                        .weight(0.8f)
                         .heightIn(min = 48.dp)
                         .testTag("btn_master_share")
                 ) {
@@ -378,15 +385,16 @@ fun MasterVerdictCard(
                         imageVector = Icons.Default.Share,
                         contentDescription = "Share Verdict",
                         tint = TechCyan,
-                        modifier = Modifier.size(15.dp)
+                        modifier = Modifier.size(14.dp)
                     )
-                    Spacer(modifier = Modifier.width(4.dp))
+                    Spacer(modifier = Modifier.width(3.dp))
                     Text(
                         text = "Share",
                         color = TechCyan,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        maxLines = 1
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
@@ -430,11 +438,13 @@ private fun HorizonActivePlanPanel(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            Spacer(modifier = Modifier.width(6.dp))
             Text(
                 text = if (remainingMs > 0L) "Valid $countdownLabel" else "Window Expired",
                 color = if (remainingMs > 0L) TextMuted else RiskAmber,
                 fontSize = 9.sp,
-                fontWeight = FontWeight.SemiBold
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1
             )
         }
 
@@ -504,9 +514,11 @@ private fun HorizonActivePlanPanel(
                 val zoneText = if (fut.entryZoneMin > 0.0 && fut.entryZoneMax > 0.0) {
                     PriceFormatter.formatZoneRange(fut.entryZoneMin, fut.entryZoneMax)
                 } else "-"
-                Row(
+                @OptIn(ExperimentalLayoutApi::class)
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
                     Text(
                         text = "${plan.state.label} ${fut.side.name} • Zone $zoneText",
@@ -560,13 +572,18 @@ private fun HorizonActivePlanPanel(
                 text = "P(win): $pWinFormatted",
                 color = TextPrimary,
                 fontSize = 9.sp,
-                fontWeight = FontWeight.SemiBold
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f, fill = false),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
+            Spacer(modifier = Modifier.width(8.dp))
             Text(
                 text = "EV: $evFormatted",
                 color = if ((plan.evR ?: 0.0) >= 0.0) BullishGreen else BearishRed,
                 fontSize = 9.sp,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                maxLines = 1
             )
         }
         Text(
@@ -624,6 +641,7 @@ fun HorizonLadderTable(
                     fontSize = 9.sp
                 )
             }
+            Spacer(modifier = Modifier.width(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Box(
                     modifier = Modifier

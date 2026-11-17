@@ -946,12 +946,13 @@ object TradingAgentsEngine {
         var sentimentContrib = 0.0
         var riskContrib = 0.0
 
-        val startIndex = minOf(14, candles.size - 4)
+        val startIndex = maxOf(minOf(14, candles.size - 4), candles.size - 250)
         for (i in startIndex until candles.size) {
-            val subCandles = candles.subList(0, i + 1)
+            val windowStart = (i - 199).coerceAtLeast(0)
+            val subCandles = candles.subList(windowStart, i + 1)
             val currentCandle = candles[i]
             val currentPrice = currentCandle.close
-            val indicators = QuantitativeEngine.computeIndicators(subCandles)
+            val indicators = QuantitativeEngine.computeIndicators(subCandles, includeSmc = false)
 
             val rsi = indicators.rsi14
             val macdHist = indicators.macd.histogram
@@ -990,9 +991,9 @@ object TradingAgentsEngine {
 
             if (activePositionEntryPrice == null) {
                 if (agentAction.isPositive && confidence >= config.minConfidenceThreshold) {
-                    val smcBacktest = indicators.smc
-                    val bullOb = smcBacktest?.activeOrderBlocks?.firstOrNull { it.type == com.example.domain.model.OrderBlockType.BULLISH_DEMAND_BLOCK }
-                    val bslBacktest = smcBacktest?.liquidityPools?.firstOrNull { it.type == com.example.domain.model.LiquidityType.BUY_SIDE_LIQUIDITY_BSL }
+                    val smcBacktest = QuantitativeEngine.computeSmartMoneyStructure(subCandles, atr)
+                    val bullOb = smcBacktest.activeOrderBlocks.firstOrNull { it.type == com.example.domain.model.OrderBlockType.BULLISH_DEMAND_BLOCK }
+                    val bslBacktest = smcBacktest.liquidityPools.firstOrNull { it.type == com.example.domain.model.LiquidityType.BUY_SIDE_LIQUIDITY_BSL }
 
                     activePositionEntryPrice = currentPrice
                     activePositionEntryTimestamp = currentCandle.timestamp

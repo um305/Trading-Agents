@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -789,13 +790,11 @@ fun LiveMarketPriceCard(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Row 2: Badges row (Exchange, Mode, Timeframe, Asset Type) - horizontal scroll prevents squeezing
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
+            // Row 2: Badges row (Exchange, Mode, Timeframe, Asset Type) - FlowRow wraps cleanly on narrow screens
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 if (isCrypto) {
                     Box(
@@ -1311,17 +1310,18 @@ fun ExecutiveDecisionResultCard(
                         )
                     }
 
-                    Row(
+                    FlowRow(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         val ageSec = (vs.candleAgeMillis / 1000L).coerceAtLeast(0L)
                         val ageStr = if (vs.candleAgeMillis > 0L) " • age ${if (ageSec >= 3600) "${ageSec / 3600}h" else if (ageSec >= 60) "${ageSec / 60}m" else "${ageSec}s"}" else ""
                         Text(
                             text = "Diagnostics: bars loaded ${vs.barsLoaded}$ageStr • ${vs.marketRegime.label}",
                             color = TextMuted,
-                            fontSize = 8.sp
+                            fontSize = 8.sp,
+                            modifier = Modifier.align(Alignment.CenterVertically)
                         )
                         if (v2Verdict != SignalVerdictState.TRADE) {
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1337,24 +1337,26 @@ fun ExecutiveDecisionResultCard(
                                         )
                                     },
                                     shape = RoundedCornerShape(6.dp),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                     modifier = Modifier
                                         .height(28.dp)
                                         .testTag("btn_verdict_arm_alert")
                                 ) {
                                     Icon(Icons.Default.NotificationsActive, contentDescription = null, tint = RiskAmber, modifier = Modifier.size(11.dp))
                                     Spacer(modifier = Modifier.width(3.dp))
-                                    Text("Arm alert", color = RiskAmber, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                    Text("Arm alert", color = RiskAmber, fontSize = 9.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                                 }
                                 OutlinedButton(
                                     onClick = { viewModel.saveSymbolToWatchlist(quote.symbol, quote.name, quote.assetType) },
                                     shape = RoundedCornerShape(6.dp),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                     modifier = Modifier
                                         .height(28.dp)
                                         .testTag("btn_verdict_save_watch")
                                 ) {
                                     Icon(Icons.Default.BookmarkAdd, contentDescription = null, tint = TechCyan, modifier = Modifier.size(11.dp))
                                     Spacer(modifier = Modifier.width(3.dp))
-                                    Text("Save to Watch", color = TechCyan, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                    Text("Save to Watch", color = TechCyan, fontSize = 9.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                                 }
                             }
                         }
@@ -1885,10 +1887,10 @@ fun ExecutiveDecisionResultCard(
                         .padding(12.dp)
                 ) {
                     Column {
-                        Row(
+                        FlowRow(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
                             Text(
                                 text = "TAKE PROFIT TARGETS (MULTI-TIER)",
@@ -2294,10 +2296,10 @@ fun ExecutiveDecisionResultCard(
                             .padding(12.dp)
                     ) {
                         Column {
-                            Row(
+                            FlowRow(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 Text(
                                     text = "FUTURES LEVERAGE & LIQUIDATION MATRIX",
@@ -2375,13 +2377,17 @@ fun ExecutiveDecisionResultCard(
                                 Text(
                                     text = "Estimated Liquidation:",
                                     color = TextSecondary,
-                                    fontSize = 11.sp
+                                    fontSize = 11.sp,
+                                    modifier = Modifier.weight(1f)
                                 )
+                                Spacer(modifier = Modifier.width(8.dp))
                                 Text(
                                     text = "$${formatPrice(setup.estimatedLiquidationPrice)} (${formatPrice(liqBuffer)}% buffer)",
                                     color = if (liqBuffer > 8.0) BullishGreen else RiskAmber,
                                     fontWeight = FontWeight.Bold,
-                                    fontSize = 11.sp
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
 
@@ -2805,14 +2811,17 @@ fun ExecutiveDecisionResultCard(
             // Save report & Architecture Pipeline toggles
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Button(
                     onClick = { showFullPipeline = !showFullPipeline },
                     colors = ButtonDefaults.buttonColors(containerColor = if (showFullPipeline) TechCyan.copy(alpha = 0.2f) else DarkSurfaceElevated),
                     shape = RoundedCornerShape(6.dp),
-                    modifier = Modifier.testTag("toggle_pipeline_button")
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                    modifier = Modifier
+                        .weight(1.25f)
+                        .testTag("toggle_pipeline_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Public,
@@ -2823,9 +2832,11 @@ fun ExecutiveDecisionResultCard(
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
                         text = if (showFullPipeline) "Hide 4 Streams" else "4 Data Streams & Agents",
-                        fontSize = 11.sp,
+                        fontSize = 10.sp,
                         color = TechCyan,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
@@ -2833,7 +2844,10 @@ fun ExecutiveDecisionResultCard(
                     onClick = { viewModel.saveCurrentReport() },
                     colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceElevated),
                     shape = RoundedCornerShape(6.dp),
-                    modifier = Modifier.testTag("save_report_button")
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                    modifier = Modifier
+                        .weight(0.95f)
+                        .testTag("save_report_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.BookmarkAdd,
@@ -2842,7 +2856,13 @@ fun ExecutiveDecisionResultCard(
                         modifier = Modifier.size(14.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("Save Report", fontSize = 11.sp, color = TextPrimary)
+                    Text(
+                        text = "Save Report",
+                        fontSize = 10.sp,
+                        color = TextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
 

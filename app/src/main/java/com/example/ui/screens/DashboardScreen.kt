@@ -405,7 +405,7 @@ private fun ChartContainer(
             .padding(12.dp)
     ) {
         Column {
-            // Header with Binance Live Tape indicator
+            // Header with Live Tape indicator
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -415,9 +415,12 @@ private fun ChartContainer(
                     text = "PRICE ACTION & VOLUME",
                     color = TextPrimary,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 11.sp
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
                 )
-
+                Spacer(modifier = Modifier.width(6.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         modifier = Modifier
@@ -427,10 +430,11 @@ private fun ChartContainer(
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = if (quote.assetType == com.example.domain.model.AssetType.CRYPTO) "LIVE TAPE (Binance)" else "STOCK FEED (Yahoo, can be delayed)",
+                        text = if (quote.assetType == com.example.domain.model.AssetType.CRYPTO) "LIVE TAPE (${uiState.selectedExchange.displayName})" else "STOCK FEED (Yahoo)",
                         color = BullishGreen,
                         fontSize = 9.sp,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
                     )
                 }
             }

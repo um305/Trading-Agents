@@ -500,10 +500,10 @@ fun DayTraderRiskSizerAndActionsCard(
             .padding(12.dp)
             .testTag("risk_budget_card")
     ) {
-        Row(
+        FlowRow(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Security, contentDescription = "Risk Budget", tint = riskColor, modifier = Modifier.size(16.dp))
@@ -650,34 +650,40 @@ fun DayTraderRiskSizerAndActionsCard(
                 .clip(RoundedCornerShape(6.dp))
                 .background(DarkSurface)
                 .padding(horizontal = 10.dp, vertical = 7.dp),
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            Column {
-                Text("Sized Qty", color = TextMuted, fontSize = 9.sp)
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Sized Qty", color = TextMuted, fontSize = 9.sp, maxLines = 1)
                 val qtyStr = PriceFormatter.formatQuantity(risk.sizedQuantity)
                 Text(
                     text = if (qtyStr == "-") "-" else "$qtyStr ${risk.unitLabel}",
                     color = TextPrimary,
                     fontWeight = FontWeight.ExtraBold,
-                    fontSize = 12.sp
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("Max Risk / Trade", color = TextMuted, fontSize = 9.sp)
+            Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("Max Risk / Trade", color = TextMuted, fontSize = 9.sp, maxLines = 1)
                 Text(
                     text = if (riskSettings.isConfigured) PriceFormatter.formatCash(riskSettings.maxRiskPerTradeDollars) else "Not Set",
                     color = TechCyan,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 12.sp
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
-            Column(horizontalAlignment = Alignment.End) {
-                Text("Net R:R", color = TextMuted, fontSize = 9.sp)
+            Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
+                Text("Net R:R", color = TextMuted, fontSize = 9.sp, maxLines = 1)
                 Text(
                     text = PriceFormatter.formatRatio(plan?.netRewardRisk),
                     color = if ((plan?.netRewardRisk ?: 0.0) >= riskSettings.minNetRewardRisk) BullishGreen else RiskAmber,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 12.sp
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }
@@ -696,8 +702,12 @@ fun DayTraderRiskSizerAndActionsCard(
                 text = "Inspect ${risk.checks.size} Risk Budget Gates (${risk.checks.count { it.isPassed }} PASS / ${risk.checks.count { !it.isPassed }} BLOCK)",
                 color = TextMuted,
                 fontSize = 9.sp,
-                fontWeight = FontWeight.SemiBold
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
             )
+            Spacer(modifier = Modifier.width(6.dp))
             Icon(
                 imageVector = if (showGatesDetail) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
                 contentDescription = null,
@@ -822,13 +832,18 @@ fun StockFundamentalsCard(
                 text = "SEC EDGAR FUNDAMENTALS (8 QUARTERS)",
                 color = TechCyan,
                 fontSize = 10.sp,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
             if (facts != null && facts.cik.isNotBlank()) {
+                Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     text = "CIK ${facts.cik}",
                     color = TextMuted,
-                    fontSize = 9.sp
+                    fontSize = 9.sp,
+                    maxLines = 1
                 )
             }
         }

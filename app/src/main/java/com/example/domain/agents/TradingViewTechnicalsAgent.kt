@@ -660,16 +660,34 @@ object TradingViewTechnicalsAgent {
 
     private fun calculateStochRSI(closes: List<Double>, period: Int): Double {
         if (closes.size < period * 2) return 50.0
-        val rsiList = mutableListOf<Double>()
-        for (i in period until closes.size) {
-            rsiList.add(calculateRSI(closes.subList(0, i + 1), period))
+        var gains = 0.0
+        var losses = 0.0
+        for (i in 1..period) {
+            val change = closes[i] - closes[i - 1]
+            if (change > 0) gains += change else losses += abs(change)
         }
-        val p = minOf(period, rsiList.size)
-        if (p == 0) return 50.0
-        val window = rsiList.takeLast(p)
-        val high = window.maxOrNull() ?: 70.0
-        val low = window.minOrNull() ?: 30.0
-        val current = window.last()
+        var avgGain = gains / period
+        var avgLoss = losses / period
+        val rsiWindow = ArrayDeque<Double>(period)
+        fun currentRsi(): Double {
+            if (avgLoss == 0.0) return 100.0
+            val rs = avgGain / avgLoss
+            return (100.0 - (100.0 / (1.0 + rs))).coerceIn(0.0, 100.0)
+        }
+        rsiWindow.addLast(currentRsi())
+        for (i in (period + 1) until closes.size) {
+            val change = closes[i] - closes[i - 1]
+            val gain = if (change > 0) change else 0.0
+            val loss = if (change < 0) abs(change) else 0.0
+            avgGain = ((avgGain * (period - 1)) + gain) / period
+            avgLoss = ((avgLoss * (period - 1)) + loss) / period
+            if (rsiWindow.size >= period) rsiWindow.removeFirst()
+            rsiWindow.addLast(currentRsi())
+        }
+        if (rsiWindow.isEmpty()) return 50.0
+        val high = rsiWindow.maxOrNull() ?: 70.0
+        val low = rsiWindow.minOrNull() ?: 30.0
+        val current = rsiWindow.last()
         if (high == low) return 50.0
         return (((current - low) / (high - low)) * 100.0).coerceIn(0.0, 100.0)
     }
