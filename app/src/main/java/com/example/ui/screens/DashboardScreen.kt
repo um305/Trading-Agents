@@ -310,16 +310,6 @@ fun DashboardScreen(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    // 4b. Plain-English "what to do now" card (beginner friendly)
-                    uiState.masterVerdict?.let { mv ->
-                        PlainTradeCard(
-                            verdict = mv,
-                            selectedHorizon = uiState.selectedHorizon,
-                            isEngineOnly = uiState.isEngineOnly
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                    }
-
                     // 5. Result Chart (Candlestick Graph with Entry, TP1, TP2, TP3, and SL overlays)
                     val chartHeight = if (isLandscape) 190 else 240
                     ChartContainer(
@@ -331,6 +321,16 @@ fun DashboardScreen(
                     )
 
                     Spacer(modifier = Modifier.height(12.dp))
+
+                    // 5b. Plain-English "what to do now" card (beginner friendly)
+                    uiState.masterVerdict?.let { mv ->
+                        PlainTradeCard(
+                            verdict = mv,
+                            selectedHorizon = uiState.selectedHorizon,
+                            isEngineOnly = uiState.isEngineOnly
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                    }
 
                     // 6. Multi-Exchange Venue Comparison (Binance, Bybit, MEXC, OKX, Coinbase) - ONLY for Crypto
                     if (isCrypto && uiState.exchangeQuotes.isNotEmpty()) {

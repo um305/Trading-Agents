@@ -1,5 +1,23 @@
 package com.example
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeDown
+import androidx.compose.ui.test.swipeRight
+import androidx.compose.ui.test.swipeUp
+import androidx.compose.ui.unit.dp
 import com.example.data.api.MarketDataService
 import com.example.domain.master.MasterVerdictEngine
 import com.example.domain.master.MasterVerdictInput
@@ -7,15 +25,22 @@ import com.example.domain.master.TradingHorizon
 import com.example.domain.model.AssetType
 import com.example.domain.model.CandlePoint
 import com.example.domain.model.CryptoExchange
+import com.example.domain.model.EntryOrderType
 import com.example.domain.model.ExchangePriceQuote
+import com.example.domain.model.PositionSide
 import com.example.domain.model.SignalVerdictState
 import com.example.domain.model.Timeframe
+import com.example.domain.model.TradeSetupPlan
 import com.example.domain.model.TradingMarketType
+import com.example.ui.components.CandlestickChart
 import com.example.ui.components.computeChartMarginsDp
+import com.example.ui.components.computeUpdatedPanOffset
+import com.example.ui.components.computeUpdatedVerticalPanPercent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -24,6 +49,9 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
 class UiAndFallbackFixesTest {
+
+    @get:Rule
+    val composeRule = createComposeRule()
 
     @Test
     fun `cleanUnavailableReason strips duplicated prefixes and normalizes HTTP codes`() {
@@ -120,6 +148,156 @@ class UiAndFallbackFixesTest {
         assertEquals(54f to 0f, computeChartMarginsDp(hasLevelBadges = false, hasCone = false))
         assertEquals(74f to 0f, computeChartMarginsDp(hasLevelBadges = true, hasCone = false))
         assertEquals(74f to 28f, computeChartMarginsDp(hasLevelBadges = true, hasCone = true))
+    }
+
+    @Test
+    fun `computeUpdatedPanOffset pans horizontally from right edge into older bars`() {
+        // 100 candles total, 20 visible => maxPan = 80f; plotWidth = 200f => 10px per candle
+        val afterRightDrag = computeUpdatedPanOffset(
+            currentPanOffset = -1f,
+            dragDeltaX = 50f, // drag finger right by 5 candles -> pan backwards by 5 bars
+            plotWidthPx = 200f,
+            visibleCandleCount = 20,
+            totalCandles = 100
+        )
+        assertEquals(75f, afterRightDrag, 0.01f)
+
+        val clampedStart = computeUpdatedPanOffset(
+            currentPanOffset = 3f,
+            dragDeltaX = 100f,
+            plotWidthPx = 200f,
+            visibleCandleCount = 20,
+            totalCandles = 100
+        )
+        assertEquals(0f, clampedStart, 0.01f)
+
+        val clampedEnd = computeUpdatedPanOffset(
+            currentPanOffset = 78f,
+            dragDeltaX = -100f,
+            plotWidthPx = 200f,
+            visibleCandleCount = 20,
+            totalCandles = 100
+        )
+        assertEquals(80f, clampedEnd, 0.01f)
+    }
+
+    @Test
+    fun `computeUpdatedVerticalPanPercent shifts price window up on downward drag and clamps cleanly`() {
+        val panUpToSeeTp = computeUpdatedVerticalPanPercent(
+            currentVerticalPanPercent = 0f,
+            dragDeltaY = 100f, // drag finger down on chart -> reveal higher prices (TP targets)
+            chartHeightPx = 200f
+        )
+        assertEquals(0.5f, panUpToSeeTp, 0.01f)
+
+        val panDownToSeeSl = computeUpdatedVerticalPanPercent(
+            currentVerticalPanPercent = 0f,
+            dragDeltaY = -100f, // drag finger up on chart -> reveal lower prices (Entry / SL)
+            chartHeightPx = 200f
+        )
+        assertEquals(-0.5f, panDownToSeeSl, 0.01f)
+
+        val clampedHigh = computeUpdatedVerticalPanPercent(3.8f, 200f, 200f)
+        assertEquals(4.0f, clampedHigh, 0.01f)
+
+        val clampedLow = computeUpdatedVerticalPanPercent(-3.8f, -200f, 200f)
+        assertEquals(-4.0f, clampedLow, 0.01f)
+    }
+
+    @Test
+    fun `candlestickChart captures vertical touch swipe without triggering parent verticalScroll`() {
+        val baseTs = 1_730_000_000_000L
+        val step = Timeframe.ONE_HOUR.stepMillis
+        val candles = (0 until 60).map { i ->
+            val p = 60_000.0 + i * 50.0
+            CandlePoint(baseTs + i * step, p - 10.0, p + 25.0, p - 25.0, p, 300.0, isClosed = true, closeTimestamp = baseTs + (i + 1) * step)
+        }
+        lateinit var scrollState: androidx.compose.foundation.ScrollState
+
+        composeRule.setContent {
+            scrollState = rememberScrollState()
+            Column(modifier = Modifier.verticalScroll(scrollState)) {
+                Box(modifier = Modifier.fillMaxWidth().height(500.dp))
+                CandlestickChart(
+                    candles = candles,
+                    modifier = Modifier.fillMaxWidth(),
+                    currentPrice = candles.last().close
+                )
+                Box(modifier = Modifier.fillMaxWidth().height(1200.dp))
+            }
+        }
+        composeRule.waitForIdle()
+        val initialScroll = scrollState.value
+
+        composeRule.onNodeWithTag("candlestick_canvas").performTouchInput {
+            swipeUp()
+        }
+        composeRule.waitForIdle()
+
+        assertEquals("Vertical swipe inside chart canvas must pan chart, not scroll outer page", initialScroll, scrollState.value)
+    }
+
+    @Test
+    fun `candlestickChart scrolls horizontally via touch inside verticalScroll even after tradeSetupPlan arrives`() {
+        val baseTs = 1_730_000_000_000L
+        val step = Timeframe.ONE_HOUR.stepMillis
+        val candles = (0 until 100).map { i ->
+            val closePrice = 1_000.0 + i * 100.0
+            CandlePoint(
+                timestamp = baseTs + i * step,
+                open = closePrice - 10.0,
+                high = closePrice + 20.0,
+                low = closePrice - 20.0,
+                close = closePrice,
+                volume = 500.0 + i,
+                isClosed = true,
+                closeTimestamp = baseTs + (i + 1) * step
+            )
+        }
+        var planState by mutableStateOf<TradeSetupPlan?>(null)
+
+        composeRule.setContent {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                CandlestickChart(
+                    candles = candles,
+                    modifier = Modifier.fillMaxWidth(),
+                    tradeSetupPlan = planState,
+                    currentPrice = candles.last().close
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        // Latest candle close is $10,900.00 before async TradeSetupPlan loads
+        composeRule.onNodeWithText("C: $10,900.00", substring = true).assertExists()
+
+        // Async TradeSetupPlan arrives (previously caused panOffset state re-creation while pointerInput kept old state!)
+        planState = TradeSetupPlan(
+            side = PositionSide.LONG,
+            pairSymbol = "BTCUSDT",
+            currentPrice = 10_900.0,
+            entryZoneStart = 10_800.0,
+            entryZoneEnd = 10_850.0,
+            recommendedEntry = 10_825.0,
+            recommendedLeverage = 5,
+            takeProfit1 = 11_100.0,
+            takeProfit2 = 11_300.0,
+            stopLoss = 10_650.0,
+            verdictState = SignalVerdictState.TRADE,
+            entryType = EntryOrderType.LIMIT,
+            timeframe = Timeframe.ONE_HOUR,
+            isAvailable = true
+        )
+        composeRule.waitForIdle()
+
+        // Swipe right horizontally across the chart to scroll into older candles
+        composeRule.onNodeWithTag("candlestick_canvas").performTouchInput {
+            swipeRight()
+        }
+        composeRule.waitForIdle()
+
+        // Header close readout updates to an older candle rather than remaining frozen on C: $10,900.00
+        composeRule.onNodeWithText("C: $10,900.00", substring = true).assertDoesNotExist()
     }
 
     @Test
